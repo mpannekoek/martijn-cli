@@ -5,7 +5,7 @@
       "name": "Debug Rust (martijn-cli)",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}/target/debug/martijn-cli",
+      "program": "${workspaceFolder}/target/debug/martijn",
       "args": [],
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "cargo: build"
