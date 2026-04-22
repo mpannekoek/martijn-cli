@@ -1,11 +1,13 @@
+// Import Clap helpers so this shell can describe its interactive command model.
+use clap::{Parser, Subcommand};
 // Import `Stdio` so we can control how spawned processes use standard streams.
 use std::process::Stdio;
-
 // Import Tokio's async `Command` so Azure CLI calls work inside async code.
 use tokio::process::Command;
-
 // Import `Uuid` so we can try parse the tenant identifier as a UUID for better error messages.
 use uuid::Uuid;
+// Import terminal color helpers so the intro stands out.
+use owo_colors::OwoColorize;
 
 // Import the shared application result type.
 use crate::AppResult;
@@ -31,34 +33,36 @@ struct AzureAccount {
     user: String,
 }
 
-// Represent one parsed command from the interactive Azure shell.
-#[derive(Debug, PartialEq, Eq)]
-enum ParsedCommand<'a> {
-    // Show the Azure shell help output.
-    Help,
-    // Refresh and print the current Azure login state.
-    Status,
-    // Run Azure login with one required tenant value.
+// Describe the argument shape for one Azure-shell command line.
+#[derive(Parser, Debug)]
+#[command(
+    name = "azure",
+    disable_help_flag = true,
+    disable_help_subcommand = true
+)]
+struct AzureShellCli {
+    // Store the one subcommand that the user typed in the Azure shell.
+    #[command(subcommand)]
+    command: AzureCommand,
+}
+
+// List the commands that the Azure shell understands.
+#[derive(Subcommand, Debug)]
+enum AzureCommand {
+    /// Login to Azure CLI with the specified tenant id.
     Login {
-        // Borrow the tenant text directly from the input line.
-        tenant: &'a str,
+        // Store the tenant id as an owned `String` because Clap creates owned values.
+        tenant: String,
     },
-    // Run Azure logout.
+    /// Run `az logout`.
     Logout,
-    // Leave the interactive Azure shell.
+    /// Show the current Azure login state.
+    Status,
+    /// Show the Azure shell help message.
+    Help,
+    /// Close the current shell session.
+    #[command(alias = "quit")]
     Exit,
-    // Report that `login` was used without the required tenant value.
-    LoginMissingTenant,
-    // Report that `login` received unexpected extra arguments.
-    LoginTooManyArguments {
-        // Keep the extra arguments so the error can mention them back to the user.
-        extra_arguments: Vec<&'a str>,
-    },
-    // Keep the original input for any command we do not recognize.
-    Unknown {
-        // Borrow the original input so we can echo it in the error message.
-        input: &'a str,
-    },
 }
 
 // Start the Azure shell.
@@ -72,49 +76,37 @@ pub(crate) async fn run() -> AppResult<()> {
     engine::run_shell(state, print_intro, handle_command).await
 }
 
-// Handle one command entered in the Azure shell.
-fn handle_command<'a>(state: &'a mut SessionState, input: &'a str) -> CommandFuture<'a> {
+// Handle one tokenized command entered in the Azure shell.
+fn handle_command<'a>(state: &'a mut SessionState, tokens: &'a [String]) -> CommandFuture<'a> {
     // Box the async block so it matches the shared `CommandFuture` type alias.
     Box::pin(async move {
-        // Parse the raw input first so commands with arguments are handled explicitly.
-        match parse_command(input) {
-            ParsedCommand::Help => {
+        // Parse the shell tokens through Clap so commands and arguments stay typed.
+        match parse_command(tokens) {
+            Ok(AzureCommand::Help) => {
                 // Print the Azure shell help text.
-                print_help();
+                engine::print_shell_help::<AzureShellCli>()?;
             }
-            ParsedCommand::Status => {
+            Ok(AzureCommand::Status) => {
                 // Refresh the cached account information before showing it.
                 refresh_and_print_status(state).await;
             }
-            ParsedCommand::Login { tenant } => {
+            Ok(AzureCommand::Login { tenant }) => {
                 // Run the login flow with the required tenant and then show the updated status.
-                handle_login(state, tenant).await;
+                handle_login(state, &tenant).await;
             }
-            ParsedCommand::Logout => {
+            Ok(AzureCommand::Logout) => {
                 // Run the logout flow and then show the updated status.
                 handle_logout(state).await;
             }
-            ParsedCommand::Exit => {
+            Ok(AzureCommand::Exit) => {
                 // Tell the user that the shell is about to close.
                 println!("Closing shell.");
                 // Ask the shared shell engine to stop the loop.
                 return Ok(ShellAction::Exit);
             }
-            ParsedCommand::LoginMissingTenant => {
-                // Explain that `login` now needs one tenant argument.
-                println!("The `login` command requires a tenant. Use `login <tenant>`.");
-            }
-            ParsedCommand::LoginTooManyArguments { extra_arguments } => {
-                // Join the unexpected trailing arguments into one readable string.
-                let extra_arguments = extra_arguments.join(" ");
-                // Explain that only one tenant value is allowed for `login`.
-                println!(
-                    "The `login` command accepts exactly one tenant. Unexpected extra arguments: `{extra_arguments}`."
-                );
-            }
-            ParsedCommand::Unknown { input } => {
-                // Explain that the command was unknown and point to the help text.
-                println!("Unknown command `{input}`. Type `help` to see available commands.");
+            Err(error) => {
+                // Reuse the shared parse error printer so every shell responds consistently.
+                engine::print_parse_error(error);
             }
         }
 
@@ -126,91 +118,19 @@ fn handle_command<'a>(state: &'a mut SessionState, input: &'a str) -> CommandFut
 // Print the intro for the Azure shell.
 fn print_intro(state: &SessionState) {
     // Identify the shell the user is currently in.
-    println!("Interactive Azure shell");
+    println!("{}", "Interactive Azure shell".bright_cyan());
     // Point the user to the help command for discoverability.
-    println!("Type `help` to see available commands.");
+    println!("{}", "Type `help` to see available commands.".bright_yellow());
     // Show the current login status immediately.
     print_status(state);
 }
 
-// Print the list of commands supported by the Azure shell.
-fn print_help() {
-    // Start with a heading so the help output is easy to scan.
-    println!("Available commands:");
-    // Explain that login needs one tenant value and show the exact syntax.
-    println!("  login <tenant-id>   Login to Azure CLI with the specified tenant`");
-    // Explain how to log out from Azure CLI.
-    println!("  logout              Run `az logout`");
-    // Explain how to inspect the current login status.
-    println!("  status              Show the current Azure login state");
-    // Explain how to show help again.
-    println!("  help                Show this help message");
-    // Explain how to close the shell.
-    println!("  exit                Close the shell");
-}
-
-// Parse one raw Azure shell input line into a structured command.
-fn parse_command(input: &str) -> ParsedCommand<'_> {
-    // Remove leading and trailing whitespace so spacing does not affect parsing.
-    let trimmed_input = input.trim();
-
-    // Return `Help` for an exact `help` command with no extra arguments.
-    if trimmed_input == "help" {
-        return ParsedCommand::Help;
-    }
-
-    // Return `Status` for an exact `status` command with no extra arguments.
-    if trimmed_input == "status" {
-        return ParsedCommand::Status;
-    }
-
-    // Return `Logout` for an exact `logout` command with no extra arguments.
-    if trimmed_input == "logout" {
-        return ParsedCommand::Logout;
-    }
-
-    // Return `Exit` for the standard shell exit words.
-    if trimmed_input == "exit" || trimmed_input == "quit" {
-        return ParsedCommand::Exit;
-    }
-
-    // Split the trimmed input on runs of whitespace so repeated spaces are harmless.
-    let mut parts = trimmed_input.split_whitespace();
-    // Read the first token because it tells us which command the user wanted.
-    let Some(command_name) = parts.next() else {
-        // Treat an empty line as unknown so the existing shell behavior stays simple.
-        return ParsedCommand::Unknown {
-            input: trimmed_input,
-        };
-    };
-
-    // Handle commands that need argument-aware parsing.
-    match command_name {
-        "login" => {
-            // Read the required tenant argument from the next token, if present.
-            let Some(tenant) = parts.next() else {
-                // Report the missing tenant explicitly so the user gets a helpful hint.
-                return ParsedCommand::LoginMissingTenant;
-            };
-
-            // Collect any remaining tokens because `login` allows only one tenant value.
-            let extra_arguments: Vec<&str> = parts.collect();
-
-            // Reject extra values instead of silently ignoring them.
-            if !extra_arguments.is_empty() {
-                return ParsedCommand::LoginTooManyArguments { extra_arguments };
-            }
-
-            // Return the parsed login command with the borrowed tenant text.
-            ParsedCommand::Login { tenant }
-        }
-        _ => {
-            // Preserve the full trimmed input for unknown-command feedback.
-            ParsedCommand::Unknown {
-                input: trimmed_input,
-            }
-        }
-    }
+// Convert tokenized Azure-shell input into one typed command.
+fn parse_command(tokens: &[String]) -> Result<AzureCommand, clap::Error> {
+    // Reuse the shared helper so every shell performs the same Clap parsing steps.
+    let cli = engine::parse_shell_command::<AzureShellCli>("azure", tokens)?;
+    // Return only the subcommand because that is all the handler needs.
+    Ok(cli.command)
 }
 
 // Print either the current Azure account or a message that no account is active.
@@ -417,48 +337,61 @@ fn azure_cli_command() -> Command {
 }
 
 fn is_guid(s: &str) -> bool {
+    // Ask the `uuid` crate to validate whether the text is a well-formed UUID.
     Uuid::try_parse(s).is_ok()
 }
 
 #[cfg(test)]
 mod tests {
-    // Import the parsing helpers from the parent module so the tests can use them directly.
-    use super::{ParsedCommand, parse_command};
+    // Import the Azure parser helper so the tests can validate command shapes.
+    use super::{AzureCommand, parse_command};
 
     #[test]
     fn parses_login_with_one_tenant() {
         // Parse a valid login command with exactly one tenant argument.
-        let parsed_command = parse_command("login my-tenant-id");
+        let parsed_command = parse_command(&[String::from("login"), String::from("my-tenant-id")])
+            .expect("command should parse");
 
-        // Confirm that the parser keeps the tenant value and returns the login variant.
-        assert_eq!(
+        // Confirm that Clap keeps the tenant value and returns the login variant.
+        assert!(matches!(
             parsed_command,
-            ParsedCommand::Login {
-                tenant: "my-tenant-id",
-            }
-        );
+            AzureCommand::Login { tenant } if tenant == "my-tenant-id"
+        ));
     }
 
     #[test]
     fn rejects_login_without_a_tenant() {
         // Parse a login command that forgot the required tenant argument.
-        let parsed_command = parse_command("login");
+        let error = parse_command(&[String::from("login")]).expect_err("command should fail");
+        // Render the Clap error into text so we can inspect the message.
+        let rendered_error = error.to_string();
 
-        // Confirm that the parser reports the specific missing-tenant error.
-        assert_eq!(parsed_command, ParsedCommand::LoginMissingTenant);
+        // Confirm that Clap reports the missing required argument.
+        assert!(rendered_error.contains("<TENANT>"));
     }
 
     #[test]
     fn rejects_login_with_extra_arguments() {
         // Parse a login command that provides more than one value after `login`.
-        let parsed_command = parse_command("login tenant-one tenant-two");
+        let error = parse_command(&[
+            String::from("login"),
+            String::from("tenant-one"),
+            String::from("tenant-two"),
+        ])
+        .expect_err("command should fail");
+        // Render the Clap error into text so we can inspect the message.
+        let rendered_error = error.to_string();
 
-        // Confirm that the parser reports the unexpected trailing argument.
-        assert_eq!(
-            parsed_command,
-            ParsedCommand::LoginTooManyArguments {
-                extra_arguments: vec!["tenant-two"],
-            }
-        );
+        // Confirm that Clap reports the unexpected extra argument.
+        assert!(rendered_error.contains("unexpected argument"));
+    }
+
+    #[test]
+    fn parses_help_as_a_real_command() {
+        // Parse the explicit help command that users can type inside the shell.
+        let parsed_command = parse_command(&[String::from("help")]).expect("command should parse");
+
+        // Confirm that help is represented as its own typed variant.
+        assert!(matches!(parsed_command, AzureCommand::Help));
     }
 }
