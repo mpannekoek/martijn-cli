@@ -8,3 +8,4 @@ clap = { version = "4.5.39", features = ["derive"] }
 figlet-rs = "0.1.5"
 owo-colors = "4.1.0"
 tokio = { version = "1.47.1", features = ["macros", "process", "rt-multi-thread"] }
+uuid = "1"
