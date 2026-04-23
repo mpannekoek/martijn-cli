@@ -1,5 +1,9 @@
 // Declare the `cli` module so this file can use the parsed command-line types.
 mod cli;
+// Declare the shared config module so shells and services can read `config.toml`.
+mod config;
+// Declare the `azure` module so the shell can delegate Azure-specific service logic.
+mod azure;
 // Declare the `shells` module so `main` can route into the interactive shells.
 mod shells;
 

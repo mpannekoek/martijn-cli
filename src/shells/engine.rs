@@ -130,6 +130,8 @@ pub(crate) async fn run_shell<State, Intro, Handler>(
     mut print_intro: Intro,
     // Accept a callback that handles one command at a time.
     mut handle_command: Handler,
+    // Accept the shell name to show in the prompt and help messages.
+    shell_name: &str,
 ) -> AppResult<()>
 where
     // The intro callback only needs read-only access to the current state.
@@ -143,7 +145,7 @@ where
     // Keep reading commands until the user exits or stdin closes.
     loop {
         // Print the prompt without a newline so the user's input stays on the same line.
-        print!("martijn> ");
+        print!("{shell_name}> ");
         // Flush stdout so the prompt becomes visible immediately.
         io::stdout().flush()?;
 

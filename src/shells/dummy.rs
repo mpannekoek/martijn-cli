@@ -42,7 +42,7 @@ pub(crate) async fn run() -> AppResult<()> {
     // This shell has no persistent state, so the unit type `()` is enough.
     let state = ();
     // Reuse the shared shell engine with this shell's intro and command handler.
-    engine::run_shell(state, print_intro, handle_command).await
+    engine::run_shell(state, print_intro, handle_command, "dummy").await
 }
 
 // Print the intro for the dummy shell.
@@ -51,7 +51,10 @@ fn print_intro(_: &()) {
     // Identify the shell the user is currently in.
     println!("{}", "Interactive Dummy shell".bright_cyan());
     // Point the user to the help command for discoverability.
-    println!("{}", "Type `help` to see available commands.".bright_yellow());
+    println!(
+        "{}",
+        "Type `help` to see available commands.".bright_yellow()
+    );
 }
 
 // Handle one tokenized command entered in the dummy shell.

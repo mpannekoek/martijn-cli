@@ -42,7 +42,7 @@ pub(crate) async fn run() -> AppResult<()> {
     // This shell does not need persistent state, so we use the unit type `()`.
     let state = ();
     // Reuse the shared shell engine with this shell's intro and command handler.
-    engine::run_shell(state, print_root_intro, handle_command).await
+    engine::run_shell(state, print_root_intro, handle_command, "martijn").await
 }
 
 // Print the intro for the root shell.
