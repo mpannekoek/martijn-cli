@@ -18,6 +18,9 @@ use owo_colors::OwoColorize;
 // Import `Uuid` so we can try parse the tenant identifier as a UUID for better error messages.
 use uuid::Uuid;
 
+// Keep one shared shell name so the prompt and Clap parser entry stay in sync.
+const SHELL_NAME: &str = "azure";
+
 // Keep the Azure shell's mutable state in one place.
 #[derive(Debug, Default)]
 struct SessionState {
@@ -102,7 +105,7 @@ pub(crate) async fn run() -> AppResult<()> {
     refresh_session_state(&mut state).await;
 
     // Reuse the shared shell engine with the Azure-specific intro and handler.
-    engine::run_shell(state, print_intro, handle_command, "azure").await
+    engine::run_shell(state, print_intro, handle_command, SHELL_NAME).await
 }
 
 // Handle one tokenized command entered in the Azure shell.
@@ -164,7 +167,7 @@ fn print_intro(state: &SessionState) {
 // Convert tokenized Azure-shell input into one typed command.
 fn parse_command(tokens: &[String]) -> Result<AzureCommand, clap::Error> {
     // Reuse the shared helper so every shell performs the same Clap parsing steps.
-    let cli = engine::parse_shell_command::<AzureShellCli>("azure", tokens)?;
+    let cli = engine::parse_shell_command::<AzureShellCli>(SHELL_NAME, tokens)?;
     // Return only the subcommand because that is all the handler needs.
     Ok(cli.command)
 }

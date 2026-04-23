@@ -10,10 +10,13 @@ use crate::AppResult;
 // Import the shared shell engine pieces used by this interactive shell.
 use crate::shells::engine::{self, CommandFuture, ShellAction};
 
+// Keep one shared shell name so the prompt and Clap parser entry stay in sync.
+const SHELL_NAME: &str = "martijn";
+
 // Describe the argument shape for one root-shell command line.
 #[derive(Parser, Debug)]
 #[command(
-    name = "root",
+    name = "martijn",
     disable_help_flag = true,
     disable_help_subcommand = true
 )]
@@ -42,7 +45,7 @@ pub(crate) async fn run() -> AppResult<()> {
     // This shell does not need persistent state, so we use the unit type `()`.
     let state = ();
     // Reuse the shared shell engine with this shell's intro and command handler.
-    engine::run_shell(state, print_root_intro, handle_command, "martijn").await
+    engine::run_shell(state, print_root_intro, handle_command, SHELL_NAME).await
 }
 
 // Print the intro for the root shell.
@@ -145,7 +148,7 @@ fn print_root_banner() {
 // Convert tokenized root-shell input into one typed command.
 fn parse_command(tokens: &[String]) -> Result<RootCommand, clap::Error> {
     // Reuse the shared helper so every shell performs the same Clap parsing steps.
-    let cli = engine::parse_shell_command::<RootShellCli>("root", tokens)?;
+    let cli = engine::parse_shell_command::<RootShellCli>(SHELL_NAME, tokens)?;
     // Return only the subcommand because that is all the handler needs.
     Ok(cli.command)
 }

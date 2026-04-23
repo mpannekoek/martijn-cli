@@ -7,6 +7,9 @@ use crate::AppResult;
 // Import the shared shell engine pieces used by this example shell.
 use crate::shells::engine::{self, CommandFuture, ShellAction};
 
+// Keep one shared shell name so the prompt and Clap parser entry stay in sync.
+const SHELL_NAME: &str = "dummy";
+
 // Describe the argument shape for one dummy-shell command line.
 #[derive(Parser, Debug)]
 #[command(
@@ -42,7 +45,7 @@ pub(crate) async fn run() -> AppResult<()> {
     // This shell has no persistent state, so the unit type `()` is enough.
     let state = ();
     // Reuse the shared shell engine with this shell's intro and command handler.
-    engine::run_shell(state, print_intro, handle_command, "dummy").await
+    engine::run_shell(state, print_intro, handle_command, SHELL_NAME).await
 }
 
 // Print the intro for the dummy shell.
@@ -100,7 +103,7 @@ fn handle_command<'a>(_: &'a mut (), tokens: &'a [String]) -> CommandFuture<'a> 
 // Convert tokenized dummy-shell input into one typed command.
 fn parse_command(tokens: &[String]) -> Result<DummyCommand, clap::Error> {
     // Reuse the shared helper so every shell performs the same Clap parsing steps.
-    let cli = engine::parse_shell_command::<DummyShellCli>("dummy", tokens)?;
+    let cli = engine::parse_shell_command::<DummyShellCli>(SHELL_NAME, tokens)?;
     // Return only the subcommand because that is all the handler needs.
     Ok(cli.command)
 }
