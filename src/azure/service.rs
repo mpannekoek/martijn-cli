@@ -229,12 +229,31 @@ async fn run_az_json_command(args: &[&str]) -> AppResult<String> {
         return Err(format!("Azure CLI exited with status {}", output.status).into());
     }
 
-    // Decode the JSON bytes into a Rust `String`.
-    let raw_json = String::from_utf8(output.stdout)
-        .map_err(|error| format!("Azure CLI output was not valid UTF-8: {error}"))?;
+    // Decode the JSON bytes into text before we hand them to `serde_json`.
+    // We first try strict UTF-8 because JSON is expected to use UTF-8 encoding.
+    // This keeps the common case simple and preserves the original text unchanged.
+    let raw_json = decode_azure_cli_json_output(&output.stdout);
 
     // Return the decoded JSON text.
     Ok(raw_json)
+}
+
+// Convert captured Azure CLI JSON bytes into a Rust `String`.
+fn decode_azure_cli_json_output(stdout_bytes: &[u8]) -> String {
+    // Try the strict UTF-8 path first because valid JSON should already decode cleanly.
+    match String::from_utf8(stdout_bytes.to_vec()) {
+        Ok(valid_utf8_text) => {
+            // Return the original text unchanged when the bytes were valid UTF-8.
+            valid_utf8_text
+        }
+        Err(_) => {
+            // Fall back to a lossy decode when Azure CLI emits one or more invalid bytes.
+            // This replaces only the broken byte sequences with the Unicode replacement character.
+            // We prefer this over aborting the full inventory command, because the surrounding JSON
+            // structure is often still intact enough for `serde_json` to parse successfully.
+            String::from_utf8_lossy(stdout_bytes).into_owned()
+        }
+    }
 }
 
 // Build a `Command` with the correct Azure CLI executable name for this platform.
@@ -312,7 +331,10 @@ fn parse_account_from_tsv(raw_output: &str) -> Option<AzureAccount> {
 #[cfg(test)]
 mod tests {
     // Import the helpers under test from the parent module.
-    use super::{build_service_principal_login_arguments, parse_account_from_tsv};
+    use super::{
+        build_service_principal_login_arguments, decode_azure_cli_json_output,
+        parse_account_from_tsv,
+    };
 
     #[test]
     fn parses_account_from_expected_tsv_output() {
@@ -353,5 +375,29 @@ mod tests {
                 "secret-value",
             ]
         );
+    }
+
+    #[test]
+    fn keeps_valid_utf8_json_output_unchanged() {
+        // Build one small JSON example that already uses valid UTF-8 text.
+        let stdout_bytes = br#"{"name":"storage-account"}"#;
+
+        // Decode the bytes with the Azure CLI JSON helper.
+        let decoded_output = decode_azure_cli_json_output(stdout_bytes);
+
+        // Confirm that clean UTF-8 output is preserved exactly.
+        assert_eq!(decoded_output, r#"{"name":"storage-account"}"#);
+    }
+
+    #[test]
+    fn replaces_invalid_utf8_bytes_when_decoding_json_output() {
+        // Build one byte sequence that contains invalid UTF-8 inside a JSON string value.
+        let stdout_bytes = b"{\"name\":\"stor\xffage-account\"}";
+
+        // Decode the bytes with the Azure CLI JSON helper.
+        let decoded_output = decode_azure_cli_json_output(stdout_bytes);
+
+        // Confirm that the invalid byte becomes the Unicode replacement character.
+        assert_eq!(decoded_output, "{\"name\":\"stor\u{FFFD}age-account\"}");
     }
 }
