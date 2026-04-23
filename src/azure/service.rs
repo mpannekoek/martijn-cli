@@ -110,8 +110,8 @@ pub(crate) async fn generate_inventory_report(account: &AzureAccount) -> AppResu
     let inventory_groups = build_inventory_groups(resource_groups).await?;
     // Count the total number of resources so the metadata stays accurate.
     let total_resource_count = count_total_resources(&inventory_groups);
-    // Create the full Markdown text, including the YAML front matter.
-    let markdown = render_inventory_markdown(account, &inventory_groups, total_resource_count);
+    // Create the full Markdown text from the report template.
+    let markdown = render_inventory_markdown(account, &inventory_groups, total_resource_count)?;
     // Resolve the target directory inside the user's home directory.
     let output_directory = resolve_inventory_output_directory()?;
 
