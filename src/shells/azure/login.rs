@@ -1,87 +1,14 @@
-// Import the Azure account model that this shell caches and displays.
-use crate::azure::model::AzureAccount;
-// Import the Azure service layer so this shell can delegate real Azure work.
-use crate::azure::service::{
-    fetch_azure_account, generate_inventory_report, inventory_reports_directory,
-    list_inventory_reports, run_az_interactive_command, run_az_service_principal_login,
-};
+// Import Azure CLI helpers used by login and logout flows.
+use crate::azure::service::{run_az_interactive_command, run_az_service_principal_login};
 // Import the shared config loader so login can use defaults from `config.toml`.
 use crate::config::load_app_config;
-// Import the shared application result type.
-use crate::AppResult;
-// Import the shared shell engine pieces used by this shell.
-use crate::shells::engine::{self, CommandFuture, ShellAction};
-// Import Clap helpers so this shell can describe its interactive command model.
-use clap::{Args, Parser, Subcommand};
-// Import terminal color helpers so the intro stands out.
-use owo_colors::OwoColorize;
 // Import `Uuid` so we can try parse the tenant identifier as a UUID for better error messages.
 use uuid::Uuid;
 
-// Keep one shared shell name so the prompt and Clap parser entry stay in sync.
-const SHELL_NAME: &str = "azure";
-
-// Keep the Azure shell's mutable state in one place.
-#[derive(Debug, Default)]
-struct SessionState {
-    // Store the currently detected Azure account.
-    // We use `Option` because the user may not be logged in.
-    account: Option<AzureAccount>,
-}
-
-// Describe the argument shape for one Azure-shell command line.
-#[derive(Parser, Debug)]
-#[command(name = "azure", disable_help_subcommand = true)]
-struct AzureShellCli {
-    // Store the one subcommand that the user typed in the Azure shell.
-    #[command(subcommand)]
-    command: AzureCommand,
-}
-
-// List the commands that the Azure shell understands.
-#[derive(Subcommand, Debug)]
-enum AzureCommand {
-    /// Login to Azure CLI as a user or service principal.
-    Login(LoginArguments),
-    /// Logout from Azure CLI and clear the cached account information.
-    Logout,
-    /// Show the current Azure login state.
-    Status,
-    /// Generate and list saved Azure inventory reports.
-    #[command(subcommand, arg_required_else_help = true)]
-    Inventory(InventoryCommand),
-    /// Show the Azure shell help message.
-    Help,
-    /// Close the current shell session.
-    #[command(alias = "quit")]
-    Exit,
-}
-
-// List the commands that belong under the Azure `inventory` command group.
-#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
-enum InventoryCommand {
-    /// Export a new Markdown inventory report.
-    Generate,
-    /// List saved Azure inventory reports.
-    #[command(alias = "ls")]
-    List,
-}
-
-// Hold the arguments that belong to the `login` subcommand.
-#[derive(Args, Debug, Clone, PartialEq, Eq)]
-struct LoginArguments {
-    // Switch to service-principal authentication instead of interactive user login.
-    #[arg(long = "service-principal")]
-    service_principal: bool,
-    // Accept an optional client ID for service-principal login.
-    #[arg(long = "client-id", requires = "service_principal")]
-    client_id: Option<String>,
-    // Accept an optional client secret for service-principal login.
-    #[arg(long = "client-secret", requires = "service_principal")]
-    client_secret: Option<String>,
-    // Accept an optional tenant for both login modes.
-    tenant: Option<String>,
-}
+// Import typed login arguments parsed by the command module.
+use super::commands::LoginArguments;
+// Import state helpers so login commands can refresh visible account status.
+use super::state::{SessionState, refresh_and_print_status};
 
 // Represent the fully resolved login request after CLI arguments and config defaults are combined.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,114 +31,8 @@ enum ResolvedLogin {
     },
 }
 
-// Start the Azure shell.
-pub(crate) async fn run() -> AppResult<()> {
-    // Create fresh state with no cached account information yet.
-    let mut state = SessionState::default();
-    // Populate the state once before the shell starts so the intro shows real status.
-    refresh_session_state(&mut state).await;
-
-    // Reuse the shared shell engine with the Azure-specific intro and handler.
-    engine::run_shell(state, print_intro, handle_command, SHELL_NAME).await
-}
-
-// Handle one tokenized command entered in the Azure shell.
-fn handle_command<'a>(state: &'a mut SessionState, tokens: &'a [String]) -> CommandFuture<'a> {
-    // Box the async block so it matches the shared `CommandFuture` type alias.
-    Box::pin(async move {
-        // Parse the shell tokens through Clap so commands and arguments stay typed.
-        match parse_command(tokens) {
-            Ok(AzureCommand::Help) => {
-                // Print the Azure shell help text.
-                engine::print_shell_help::<AzureShellCli>()?;
-            }
-            Ok(AzureCommand::Status) => {
-                // Refresh the cached account information before showing it.
-                refresh_and_print_status(state).await;
-            }
-            Ok(AzureCommand::Inventory(InventoryCommand::Generate)) => {
-                // Build the Markdown inventory report and save it to disk.
-                handle_inventory_generate(state).await;
-            }
-            Ok(AzureCommand::Inventory(InventoryCommand::List)) => {
-                // List the Markdown inventory reports already saved on disk.
-                handle_inventory_list();
-            }
-            Ok(AzureCommand::Login(arguments)) => {
-                // Run the login flow after resolving CLI arguments and config defaults together.
-                handle_login(state, &arguments).await;
-            }
-            Ok(AzureCommand::Logout) => {
-                // Run the logout flow and then show the updated status.
-                handle_logout(state).await;
-            }
-            Ok(AzureCommand::Exit) => {
-                // Tell the user that the shell is about to close.
-                println!("Closing shell.");
-                // Ask the shared shell engine to stop the loop.
-                return Ok(ShellAction::Exit);
-            }
-            Err(error) => {
-                // Treat Clap's generated help as a successful user request, not as a mistake.
-                if error.kind() == clap::error::ErrorKind::DisplayHelp
-                    || error.kind()
-                        == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-                {
-                    // Print the rendered help exactly as Clap produced it.
-                    print!("{error}");
-                } else {
-                    // Reuse the shared parse error printer so real mistakes still get a hint.
-                    engine::print_parse_error(error);
-                }
-            }
-        }
-
-        // Keep the Azure shell open after every non-exit command.
-        Ok(ShellAction::Continue)
-    })
-}
-
-// Print the intro for the Azure shell.
-fn print_intro(state: &SessionState) {
-    // Identify the shell the user is currently in.
-    println!("{}", "Interactive Azure shell".bright_cyan());
-    // Point the user to the help command for discoverability.
-    println!(
-        "{}",
-        "Type `help` to see available commands.".bright_yellow()
-    );
-    // Show the current login status immediately.
-    print_status(state);
-}
-
-// Convert tokenized Azure-shell input into one typed command.
-fn parse_command(tokens: &[String]) -> Result<AzureCommand, clap::Error> {
-    // Reuse the shared helper so every shell performs the same Clap parsing steps.
-    let cli = engine::parse_shell_command::<AzureShellCli>(SHELL_NAME, tokens)?;
-    // Return only the subcommand because that is all the handler needs.
-    Ok(cli.command)
-}
-
-// Print either the current Azure account or a message that no account is active.
-fn print_status(state: &SessionState) {
-    // Match on the optional account because the user may or may not be logged in.
-    match &state.account {
-        Some(account) => {
-            // Show the user, subscription name and subscription identifier.
-            println!(
-                "Logged in as {} ({}) on subscription {}",
-                account.user, account.name, account.subscription_id
-            );
-        }
-        None => {
-            // Explain clearly that no Azure login session was detected.
-            println!("Not logged in to Azure CLI.");
-        }
-    }
-}
-
 // Run `az login`, report the outcome and refresh the visible state afterwards.
-async fn handle_login(state: &mut SessionState, arguments: &LoginArguments) {
+pub(super) async fn handle_login(state: &mut SessionState, arguments: &LoginArguments) {
     // Load the optional config file first so CLI arguments can override those defaults cleanly.
     let config = match load_app_config() {
         Ok(config) => config,
@@ -261,7 +82,7 @@ async fn handle_login(state: &mut SessionState, arguments: &LoginArguments) {
 }
 
 // Run `az logout`, report the outcome and refresh the visible state afterwards.
-async fn handle_logout(state: &mut SessionState) {
+pub(super) async fn handle_logout(state: &mut SessionState) {
     // Run the Azure CLI logout command and inspect whether it succeeded.
     match run_az_interactive_command(&["logout"]).await {
         Ok(true) => {
@@ -280,93 +101,6 @@ async fn handle_logout(state: &mut SessionState) {
 
     // Refresh and print the cached status so the shell reflects the newest state.
     refresh_and_print_status(state).await;
-}
-
-// Build the Azure inventory report, save it as Markdown and tell the user where it lives.
-async fn handle_inventory_generate(state: &mut SessionState) {
-    // Refresh the login state first so the command works with the latest Azure session.
-    refresh_session_state(state).await;
-
-    // Stop early when no Azure account is active.
-    let Some(account) = state.account.as_ref() else {
-        println!("Not logged in to Azure CLI. Run `login <tenant>` first.");
-        return;
-    };
-
-    // Ask the service layer to build and write the inventory report.
-    match generate_inventory_report(account).await {
-        Ok(output_file_path) => {
-            // Confirm success and show the final path to the newly created report.
-            println!("Azure inventory saved to {}", output_file_path.display());
-        }
-        Err(error) => {
-            // Explain clearly why the report could not be generated.
-            println!("Unable to generate the Azure inventory report: {error}");
-        }
-    }
-}
-
-// List saved Azure inventory reports from the local inventory directory.
-fn handle_inventory_list() {
-    // Ask the service layer for the filtered, newest-first report list.
-    let reports = match list_inventory_reports() {
-        Ok(reports) => reports,
-        Err(error) => {
-            // Show the concrete filesystem problem when listing cannot continue.
-            println!("Unable to list Azure inventory reports: {error}");
-            return;
-        }
-    };
-
-    // Stop early with a friendly message when there is nothing to show.
-    if reports.is_empty() {
-        // Resolve the directory for the message so the user knows where reports are expected.
-        match inventory_reports_directory() {
-            Ok(directory) => {
-                // Include the path because it is the most useful next place to inspect.
-                println!(
-                    "No Azure inventory reports found in {}.",
-                    directory.display()
-                );
-            }
-            Err(error) => {
-                // Fall back to the underlying path error when even the directory cannot resolve.
-                println!("Unable to resolve the Azure inventory directory: {error}");
-            }
-        }
-        return;
-    }
-
-    // Print every report path in the newest-first order returned by the service layer.
-    for report in reports {
-        // Display the full path so users can open or copy the report directly.
-        println!("{}", report.path.display());
-    }
-}
-
-// Refresh the cached Azure account and immediately print the visible status.
-async fn refresh_and_print_status(state: &mut SessionState) {
-    // Update the in-memory account data first.
-    refresh_session_state(state).await;
-    // Print the new status after the refresh.
-    print_status(state);
-}
-
-// Refresh the cached Azure account state by asking Azure CLI for the current account.
-async fn refresh_session_state(state: &mut SessionState) {
-    // Fetch the account data and handle both success and failure explicitly.
-    match fetch_azure_account().await {
-        Ok(account) => {
-            // Replace the cached account with the freshly fetched value.
-            state.account = account;
-        }
-        Err(error) => {
-            // Clear the cached account when the status check itself failed.
-            state.account = None;
-            // Show the concrete error so the user understands why status is unavailable.
-            println!("Azure status check failed: {error}");
-        }
-    }
 }
 
 // Validate whether the tenant string is a real UUID.
@@ -583,133 +317,11 @@ async fn run_service_principal_login(tenant: &str, client_id: &str, client_secre
 mod tests {
     // Import the shared config types so tests can resolve login defaults explicitly.
     use crate::config::{AppConfig, AzureConfig, AzureServicePrincipalConfig};
-    // Import Clap's error kind enum so tests can distinguish help from real parse failures.
-    use clap::error::ErrorKind;
-    // Import the Azure parser and resolver helpers so the tests can validate command behavior.
-    use super::{
-        AzureCommand, InventoryCommand, LoginArguments, ResolvedLogin, parse_command, resolve_login,
-    };
 
-    #[test]
-    fn parses_login_with_one_tenant() {
-        // Parse a valid login command with exactly one tenant argument.
-        let parsed_command = parse_command(&[String::from("login"), String::from("my-tenant-id")])
-            .expect("command should parse");
-
-        // Confirm that Clap keeps the tenant value and returns the login variant.
-        assert!(matches!(
-            parsed_command,
-            AzureCommand::Login(LoginArguments {
-                tenant: Some(tenant),
-                service_principal: false,
-                client_id: None,
-                client_secret: None,
-            }) if tenant == "my-tenant-id"
-        ));
-    }
-
-    #[test]
-    fn parses_bare_login_without_arguments() {
-        // Parse a bare login command that relies on later config resolution.
-        let parsed_command = parse_command(&[String::from("login")]).expect("command should parse");
-
-        // Confirm that Clap represents the missing values as `None`.
-        assert!(matches!(
-            parsed_command,
-            AzureCommand::Login(LoginArguments {
-                tenant: None,
-                service_principal: false,
-                client_id: None,
-                client_secret: None,
-            })
-        ));
-    }
-
-    #[test]
-    fn parses_service_principal_login_with_flags() {
-        // Parse a service-principal login command with explicit flags.
-        let parsed_command = parse_command(&[
-            String::from("login"),
-            String::from("--service-principal"),
-            String::from("--client-id"),
-            String::from("client-id"),
-            String::from("--client-secret"),
-            String::from("secret-value"),
-            String::from("tenant-id"),
-        ])
-        .expect("command should parse");
-
-        // Confirm that Clap keeps all service-principal values in the typed command.
-        assert!(matches!(
-            parsed_command,
-            AzureCommand::Login(LoginArguments {
-                tenant: Some(tenant),
-                service_principal: true,
-                client_id: Some(client_id),
-                client_secret: Some(client_secret),
-            }) if tenant == "tenant-id" && client_id == "client-id" && client_secret == "secret-value"
-        ));
-    }
-
-    #[test]
-    fn rejects_service_principal_fields_without_service_principal_flag() {
-        // Parse a login command that provides a service-principal field without the mode flag.
-        let error = parse_command(&[
-            String::from("login"),
-            String::from("--client-id"),
-            String::from("client-id"),
-        ])
-        .expect_err("command should fail");
-        // Render the Clap error into text so we can inspect the message.
-        let rendered_error = error.to_string();
-
-        // Confirm that Clap explains the missing required `--service-principal` flag.
-        assert!(rendered_error.contains("--service-principal"));
-    }
-
-    #[test]
-    fn rejects_login_with_extra_arguments() {
-        // Parse a login command that provides more than one value after `login`.
-        let error = parse_command(&[
-            String::from("login"),
-            String::from("tenant-one"),
-            String::from("tenant-two"),
-        ])
-        .expect_err("command should fail");
-        // Render the Clap error into text so we can inspect the message.
-        let rendered_error = error.to_string();
-
-        // Confirm that Clap reports the unexpected extra argument.
-        assert!(rendered_error.contains("unexpected argument"));
-    }
-
-    #[test]
-    fn login_help_is_reported_as_display_help() {
-        // Parse `login --help`, which Clap represents as a display request instead of a command.
-        let error = parse_command(&[String::from("login"), String::from("--help")])
-            .expect_err("help should be returned as a Clap display error");
-
-        // Confirm that the parser reports intentional help output, not an invalid argument.
-        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
-    }
-
-    #[test]
-    fn login_help_lists_the_available_login_options() {
-        // Ask Clap to render the help text for the login subcommand.
-        let error = parse_command(&[String::from("login"), String::from("--help")])
-            .expect_err("help should be returned as a Clap display error");
-        // Convert the rendered help into a string so the test can inspect it.
-        let rendered_help = error.to_string();
-
-        // Confirm that service-principal mode is visible in the help output.
-        assert!(rendered_help.contains("--service-principal"));
-        // Confirm that users can discover the client ID flag from the help output.
-        assert!(rendered_help.contains("--client-id"));
-        // Confirm that users can discover the client secret flag from the help output.
-        assert!(rendered_help.contains("--client-secret"));
-        // Confirm that the optional tenant positional argument is visible in the usage line.
-        assert!(rendered_help.contains("[TENANT]"));
-    }
+    // Import the login argument type so tests can build parsed command inputs.
+    use super::super::commands::LoginArguments;
+    // Import the resolver helpers so the tests can validate login behavior.
+    use super::{ResolvedLogin, resolve_login};
 
     #[test]
     fn bare_login_auto_detects_service_principal_from_complete_config() {
@@ -921,7 +533,7 @@ mod tests {
             client_secret: Some(String::from("   ")),
             tenant: Some(String::from("00000000-0000-0000-0000-000000000000")),
         };
-        // Use an empty config so the test only covers the explicit secret value above.
+        // Use an empty config so the test only covers the explicit secret value.
         let config = AppConfig::default();
 
         // Try to resolve the login and capture the expected validation error.
@@ -929,104 +541,5 @@ mod tests {
 
         // Confirm that the error explains the blank client secret clearly.
         assert!(error.contains("requires a client secret"));
-    }
-
-    #[test]
-    fn parses_help_as_a_real_command() {
-        // Parse the explicit help command that users can type inside the shell.
-        let parsed_command = parse_command(&[String::from("help")]).expect("command should parse");
-
-        // Confirm that help is represented as its own typed variant.
-        assert!(matches!(parsed_command, AzureCommand::Help));
-    }
-
-    #[test]
-    fn parses_inventory_generate_as_a_real_command() {
-        // Parse the inventory generation command that writes a new report.
-        let parsed_command = parse_command(&[String::from("inventory"), String::from("generate")])
-            .expect("command should parse");
-
-        // Confirm that Clap routes the nested command to the generate variant.
-        assert!(matches!(
-            parsed_command,
-            AzureCommand::Inventory(InventoryCommand::Generate)
-        ));
-    }
-
-    #[test]
-    fn parses_inventory_list_as_a_real_command() {
-        // Parse the inventory list command that shows saved reports.
-        let parsed_command = parse_command(&[String::from("inventory"), String::from("list")])
-            .expect("command should parse");
-
-        // Confirm that Clap routes the nested command to the list variant.
-        assert!(matches!(
-            parsed_command,
-            AzureCommand::Inventory(InventoryCommand::List)
-        ));
-    }
-
-    #[test]
-    fn parses_inventory_ls_as_an_alias_for_list() {
-        // Parse the short inventory alias that should behave like `inventory list`.
-        let parsed_command = parse_command(&[String::from("inventory"), String::from("ls")])
-            .expect("command should parse");
-
-        // Confirm that the alias resolves to the same typed list variant.
-        assert!(matches!(
-            parsed_command,
-            AzureCommand::Inventory(InventoryCommand::List)
-        ));
-    }
-
-    #[test]
-    fn inventory_without_a_subcommand_shows_inventory_help() {
-        // Parse the parent inventory command without the required nested command.
-        let error = parse_command(&[String::from("inventory")])
-            .expect_err("missing subcommand should show help");
-        // Render the Clap error into text so we can inspect the message.
-        let rendered_error = error.to_string();
-
-        // Confirm that Clap reports intentional help output for the missing subcommand.
-        assert_eq!(
-            error.kind(),
-            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-        );
-        // Confirm that the inventory command help shows the nested command usage.
-        assert!(rendered_error.contains("Usage: azure inventory <COMMAND>"));
-        // Confirm that the inventory command help lists the generate subcommand.
-        assert!(rendered_error.contains("generate"));
-        // Confirm that the inventory command help lists the list subcommand.
-        assert!(rendered_error.contains("list"));
-    }
-
-    #[test]
-    fn inventory_list_help_is_reported_as_display_help() {
-        // Parse `inventory list -h`, which Clap represents as a help display request.
-        let error = parse_command(&[
-            String::from("inventory"),
-            String::from("list"),
-            String::from("-h"),
-        ])
-        .expect_err("help should be returned as a Clap display error");
-
-        // Confirm that the parser reports intentional help output, not a real parse failure.
-        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
-    }
-
-    #[test]
-    fn inventory_list_help_describes_saved_report_listing() {
-        // Ask Clap to render the help text for the inventory list subcommand.
-        let error = parse_command(&[
-            String::from("inventory"),
-            String::from("list"),
-            String::from("-h"),
-        ])
-        .expect_err("help should be returned as a Clap display error");
-        // Convert the rendered help into a string so the test can inspect it.
-        let rendered_help = error.to_string();
-
-        // Confirm that the help text describes listing saved inventory reports.
-        assert!(rendered_help.contains("List saved Azure inventory reports"));
     }
 }
