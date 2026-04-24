@@ -29,7 +29,7 @@
 {% for group_name in empty_resource_groups %}- {{ group_name }}
 {% endfor %}
 {% else %}
-- -
+At this time, there are no empty resource groups.
 {% endif %}
 
 ### Signals
@@ -37,9 +37,9 @@
 - Non-standard regions detected:{% if non_standard_regions | length > 0 %} {{ non_standard_regions | join(sep=", ") }}{% else %} -{% endif %} (westeurope is the default)
 
 {% for group in groups %}
-## Resource Group: {{ group.name }} ({{ group.location }})
+## {{ group.name }} ({{ group.location }})
 
-- Total resources: {{ group.total_resources }}
+Total resources: {{ group.total_resources }}
 
 | Name | Type | Location | SKU | Tags |
 |------|------|----------|-----|------|

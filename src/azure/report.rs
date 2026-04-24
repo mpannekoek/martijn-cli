@@ -768,7 +768,7 @@ mod tests {
         assert!(markdown.contains("### Empty resource groups"));
         assert!(markdown.contains("### Signals"));
         // Confirm that group sections and table headers are present.
-        assert!(markdown.contains("## Resource Group: rg-app-prod (westeurope)"));
+        assert!(markdown.contains("## rg-app-prod (westeurope)"));
         assert!(markdown.contains("| Name | Type | Location | SKU | Tags |"));
         // Confirm that the first row is rendered and that no blank line splits it from separator.
         assert!(
