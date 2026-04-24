@@ -2,8 +2,8 @@
 use crate::azure::model::AzureAccount;
 // Import the Azure service layer so this shell can delegate real Azure work.
 use crate::azure::service::{
-    fetch_azure_account, generate_inventory_report, run_az_interactive_command,
-    run_az_service_principal_login,
+    fetch_azure_account, generate_inventory_report, inventory_reports_directory,
+    list_inventory_reports, run_az_interactive_command, run_az_service_principal_login,
 };
 // Import the shared config loader so login can use defaults from `config.toml`.
 use crate::config::load_app_config;
@@ -31,11 +31,7 @@ struct SessionState {
 
 // Describe the argument shape for one Azure-shell command line.
 #[derive(Parser, Debug)]
-#[command(
-    name = "azure",
-    disable_help_flag = true,
-    disable_help_subcommand = true
-)]
+#[command(name = "azure", disable_help_subcommand = true)]
 struct AzureShellCli {
     // Store the one subcommand that the user typed in the Azure shell.
     #[command(subcommand)]
@@ -47,17 +43,28 @@ struct AzureShellCli {
 enum AzureCommand {
     /// Login to Azure CLI as a user or service principal.
     Login(LoginArguments),
-    /// Run `az logout`.
+    /// Logout from Azure CLI and clear the cached account information.
     Logout,
     /// Show the current Azure login state.
     Status,
-    /// Export a Markdown inventory of resources grouped by resource group.
-    Inventory,
+    /// Generate and list saved Azure inventory reports.
+    #[command(subcommand, arg_required_else_help = true)]
+    Inventory(InventoryCommand),
     /// Show the Azure shell help message.
     Help,
     /// Close the current shell session.
     #[command(alias = "quit")]
     Exit,
+}
+
+// List the commands that belong under the Azure `inventory` command group.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+enum InventoryCommand {
+    /// Export a new Markdown inventory report.
+    Generate,
+    /// List saved Azure inventory reports.
+    #[command(alias = "ls")]
+    List,
 }
 
 // Hold the arguments that belong to the `login` subcommand.
@@ -122,9 +129,13 @@ fn handle_command<'a>(state: &'a mut SessionState, tokens: &'a [String]) -> Comm
                 // Refresh the cached account information before showing it.
                 refresh_and_print_status(state).await;
             }
-            Ok(AzureCommand::Inventory) => {
+            Ok(AzureCommand::Inventory(InventoryCommand::Generate)) => {
                 // Build the Markdown inventory report and save it to disk.
-                handle_inventory(state).await;
+                handle_inventory_generate(state).await;
+            }
+            Ok(AzureCommand::Inventory(InventoryCommand::List)) => {
+                // List the Markdown inventory reports already saved on disk.
+                handle_inventory_list();
             }
             Ok(AzureCommand::Login(arguments)) => {
                 // Run the login flow after resolving CLI arguments and config defaults together.
@@ -141,8 +152,17 @@ fn handle_command<'a>(state: &'a mut SessionState, tokens: &'a [String]) -> Comm
                 return Ok(ShellAction::Exit);
             }
             Err(error) => {
-                // Reuse the shared parse error printer so every shell responds consistently.
-                engine::print_parse_error(error);
+                // Treat Clap's generated help as a successful user request, not as a mistake.
+                if error.kind() == clap::error::ErrorKind::DisplayHelp
+                    || error.kind()
+                        == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                {
+                    // Print the rendered help exactly as Clap produced it.
+                    print!("{error}");
+                } else {
+                    // Reuse the shared parse error printer so real mistakes still get a hint.
+                    engine::print_parse_error(error);
+                }
             }
         }
 
@@ -263,7 +283,7 @@ async fn handle_logout(state: &mut SessionState) {
 }
 
 // Build the Azure inventory report, save it as Markdown and tell the user where it lives.
-async fn handle_inventory(state: &mut SessionState) {
+async fn handle_inventory_generate(state: &mut SessionState) {
     // Refresh the login state first so the command works with the latest Azure session.
     refresh_session_state(state).await;
 
@@ -283,6 +303,44 @@ async fn handle_inventory(state: &mut SessionState) {
             // Explain clearly why the report could not be generated.
             println!("Unable to generate the Azure inventory report: {error}");
         }
+    }
+}
+
+// List saved Azure inventory reports from the local inventory directory.
+fn handle_inventory_list() {
+    // Ask the service layer for the filtered, newest-first report list.
+    let reports = match list_inventory_reports() {
+        Ok(reports) => reports,
+        Err(error) => {
+            // Show the concrete filesystem problem when listing cannot continue.
+            println!("Unable to list Azure inventory reports: {error}");
+            return;
+        }
+    };
+
+    // Stop early with a friendly message when there is nothing to show.
+    if reports.is_empty() {
+        // Resolve the directory for the message so the user knows where reports are expected.
+        match inventory_reports_directory() {
+            Ok(directory) => {
+                // Include the path because it is the most useful next place to inspect.
+                println!(
+                    "No Azure inventory reports found in {}.",
+                    directory.display()
+                );
+            }
+            Err(error) => {
+                // Fall back to the underlying path error when even the directory cannot resolve.
+                println!("Unable to resolve the Azure inventory directory: {error}");
+            }
+        }
+        return;
+    }
+
+    // Print every report path in the newest-first order returned by the service layer.
+    for report in reports {
+        // Display the full path so users can open or copy the report directly.
+        println!("{}", report.path.display());
     }
 }
 
@@ -525,8 +583,12 @@ async fn run_service_principal_login(tenant: &str, client_id: &str, client_secre
 mod tests {
     // Import the shared config types so tests can resolve login defaults explicitly.
     use crate::config::{AppConfig, AzureConfig, AzureServicePrincipalConfig};
+    // Import Clap's error kind enum so tests can distinguish help from real parse failures.
+    use clap::error::ErrorKind;
     // Import the Azure parser and resolver helpers so the tests can validate command behavior.
-    use super::{AzureCommand, LoginArguments, ResolvedLogin, parse_command, resolve_login};
+    use super::{
+        AzureCommand, InventoryCommand, LoginArguments, ResolvedLogin, parse_command, resolve_login,
+    };
 
     #[test]
     fn parses_login_with_one_tenant() {
@@ -619,6 +681,34 @@ mod tests {
 
         // Confirm that Clap reports the unexpected extra argument.
         assert!(rendered_error.contains("unexpected argument"));
+    }
+
+    #[test]
+    fn login_help_is_reported_as_display_help() {
+        // Parse `login --help`, which Clap represents as a display request instead of a command.
+        let error = parse_command(&[String::from("login"), String::from("--help")])
+            .expect_err("help should be returned as a Clap display error");
+
+        // Confirm that the parser reports intentional help output, not an invalid argument.
+        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn login_help_lists_the_available_login_options() {
+        // Ask Clap to render the help text for the login subcommand.
+        let error = parse_command(&[String::from("login"), String::from("--help")])
+            .expect_err("help should be returned as a Clap display error");
+        // Convert the rendered help into a string so the test can inspect it.
+        let rendered_help = error.to_string();
+
+        // Confirm that service-principal mode is visible in the help output.
+        assert!(rendered_help.contains("--service-principal"));
+        // Confirm that users can discover the client ID flag from the help output.
+        assert!(rendered_help.contains("--client-id"));
+        // Confirm that users can discover the client secret flag from the help output.
+        assert!(rendered_help.contains("--client-secret"));
+        // Confirm that the optional tenant positional argument is visible in the usage line.
+        assert!(rendered_help.contains("[TENANT]"));
     }
 
     #[test]
@@ -851,24 +941,92 @@ mod tests {
     }
 
     #[test]
-    fn parses_inventory_as_a_real_command() {
-        // Parse the explicit inventory command that users can type inside the shell.
-        let parsed_command =
-            parse_command(&[String::from("inventory")]).expect("command should parse");
+    fn parses_inventory_generate_as_a_real_command() {
+        // Parse the inventory generation command that writes a new report.
+        let parsed_command = parse_command(&[String::from("inventory"), String::from("generate")])
+            .expect("command should parse");
 
-        // Confirm that inventory is represented as its own typed variant.
-        assert!(matches!(parsed_command, AzureCommand::Inventory));
+        // Confirm that Clap routes the nested command to the generate variant.
+        assert!(matches!(
+            parsed_command,
+            AzureCommand::Inventory(InventoryCommand::Generate)
+        ));
     }
 
     #[test]
-    fn rejects_inventory_with_extra_arguments() {
-        // Parse an inventory command that should not accept any extra values.
-        let error = parse_command(&[String::from("inventory"), String::from("unexpected")])
-            .expect_err("command should fail");
+    fn parses_inventory_list_as_a_real_command() {
+        // Parse the inventory list command that shows saved reports.
+        let parsed_command = parse_command(&[String::from("inventory"), String::from("list")])
+            .expect("command should parse");
+
+        // Confirm that Clap routes the nested command to the list variant.
+        assert!(matches!(
+            parsed_command,
+            AzureCommand::Inventory(InventoryCommand::List)
+        ));
+    }
+
+    #[test]
+    fn parses_inventory_ls_as_an_alias_for_list() {
+        // Parse the short inventory alias that should behave like `inventory list`.
+        let parsed_command = parse_command(&[String::from("inventory"), String::from("ls")])
+            .expect("command should parse");
+
+        // Confirm that the alias resolves to the same typed list variant.
+        assert!(matches!(
+            parsed_command,
+            AzureCommand::Inventory(InventoryCommand::List)
+        ));
+    }
+
+    #[test]
+    fn inventory_without_a_subcommand_shows_inventory_help() {
+        // Parse the parent inventory command without the required nested command.
+        let error = parse_command(&[String::from("inventory")])
+            .expect_err("missing subcommand should show help");
         // Render the Clap error into text so we can inspect the message.
         let rendered_error = error.to_string();
 
-        // Confirm that Clap reports the unexpected extra argument.
-        assert!(rendered_error.contains("unexpected argument"));
+        // Confirm that Clap reports intentional help output for the missing subcommand.
+        assert_eq!(
+            error.kind(),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+        // Confirm that the inventory command help shows the nested command usage.
+        assert!(rendered_error.contains("Usage: azure inventory <COMMAND>"));
+        // Confirm that the inventory command help lists the generate subcommand.
+        assert!(rendered_error.contains("generate"));
+        // Confirm that the inventory command help lists the list subcommand.
+        assert!(rendered_error.contains("list"));
+    }
+
+    #[test]
+    fn inventory_list_help_is_reported_as_display_help() {
+        // Parse `inventory list -h`, which Clap represents as a help display request.
+        let error = parse_command(&[
+            String::from("inventory"),
+            String::from("list"),
+            String::from("-h"),
+        ])
+        .expect_err("help should be returned as a Clap display error");
+
+        // Confirm that the parser reports intentional help output, not a real parse failure.
+        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn inventory_list_help_describes_saved_report_listing() {
+        // Ask Clap to render the help text for the inventory list subcommand.
+        let error = parse_command(&[
+            String::from("inventory"),
+            String::from("list"),
+            String::from("-h"),
+        ])
+        .expect_err("help should be returned as a Clap display error");
+        // Convert the rendered help into a string so the test can inspect it.
+        let rendered_help = error.to_string();
+
+        // Confirm that the help text describes listing saved inventory reports.
+        assert!(rendered_help.contains("List saved Azure inventory reports"));
     }
 }

@@ -11,12 +11,27 @@ use crate::azure::report::{
 use crate::AppResult;
 // Import filesystem helpers so we can create directories and write files.
 use std::fs;
-// Import `PathBuf` because this service returns the written file path.
-use std::path::PathBuf;
+// Import `Path` and `PathBuf` because this service reads and writes report files.
+use std::path::{Path, PathBuf};
 // Import `Stdio` so we can control how spawned processes use standard streams.
 use std::process::Stdio;
+// Import `SystemTime` so inventory listings can expose filesystem modification times.
+use std::time::SystemTime;
 // Import Tokio's async `Command` so Azure CLI calls work inside async code.
 use tokio::process::Command;
+
+// Describe one saved Azure inventory Markdown report on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InventoryReportFile {
+    // Store the plain file name so shell output can stay compact.
+    pub(crate) file_name: String,
+    // Store the full path so callers can still locate the file exactly.
+    pub(crate) path: PathBuf,
+    // Store the optional modified time because some filesystems may not provide it.
+    pub(crate) modified_at: Option<SystemTime>,
+    // Store the file size in bytes so users can quickly compare reports.
+    pub(crate) size_bytes: u64,
+}
 
 // Ask Azure CLI for the active account and convert the output into structured data.
 pub(crate) async fn fetch_azure_account() -> AppResult<Option<AzureAccount>> {
@@ -138,6 +153,105 @@ pub(crate) async fn generate_inventory_report(account: &AzureAccount) -> AppResu
 
     // Return the full path to the newly created inventory report.
     Ok(output_file_path)
+}
+
+// Return the directory where Azure inventory reports are stored.
+pub(crate) fn inventory_reports_directory() -> AppResult<PathBuf> {
+    // Reuse the same report helper as generation so list and generate stay in sync.
+    resolve_inventory_output_directory()
+}
+
+// List saved Azure inventory reports from the standard inventory directory.
+pub(crate) fn list_inventory_reports() -> AppResult<Vec<InventoryReportFile>> {
+    // Resolve the directory once so errors mention the same location users know from generation.
+    let output_directory = inventory_reports_directory()?;
+    // Delegate to the path-based helper so tests can use temporary directories.
+    list_inventory_reports_in_directory(&output_directory)
+}
+
+// List saved Azure inventory reports from one concrete directory.
+fn list_inventory_reports_in_directory(directory: &Path) -> AppResult<Vec<InventoryReportFile>> {
+    // Try to open the directory and handle a missing directory as an empty list.
+    let directory_entries = match fs::read_dir(directory) {
+        Ok(directory_entries) => directory_entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Return no reports when the inventory directory has not been created yet.
+            return Ok(Vec::new());
+        }
+        Err(error) => {
+            // Return a readable error for permission problems or other filesystem failures.
+            return Err(format!(
+                "unable to read the inventory directory `{}`: {error}",
+                directory.display()
+            )
+            .into());
+        }
+    };
+
+    // Store only files that match the inventory report naming convention.
+    let mut reports: Vec<InventoryReportFile> = Vec::new();
+
+    // Walk through the directory entries one by one so every fallible step is explicit.
+    for directory_entry_result in directory_entries {
+        // Convert a failed directory entry read into a readable application error.
+        let directory_entry = directory_entry_result.map_err(|error| {
+            format!(
+                "unable to read an entry in the inventory directory `{}`: {error}",
+                directory.display()
+            )
+        })?;
+        // Keep the full path so metadata and shell output can refer to the same file.
+        let path = directory_entry.path();
+        // Read metadata before accepting the entry so directories are ignored.
+        let metadata = directory_entry.metadata().map_err(|error| {
+            format!(
+                "unable to read metadata for inventory path `{}`: {error}",
+                path.display()
+            )
+        })?;
+
+        // Skip directories and special files because only Markdown files are report entries.
+        if !metadata.is_file() {
+            continue;
+        }
+
+        // Convert the OS file name into UTF-8, ignoring names that cannot be displayed safely.
+        let Some(file_name) = directory_entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+
+        // Skip files that do not match the report prefix and Markdown extension.
+        if !is_inventory_report_file_name(&file_name) {
+            continue;
+        }
+
+        // Add the accepted report with the metadata needed for table output.
+        reports.push(InventoryReportFile {
+            file_name,
+            path,
+            modified_at: metadata.modified().ok(),
+            size_bytes: metadata.len(),
+        });
+    }
+
+    // Sort newest reports first, and use file name order to keep ties deterministic.
+    reports.sort_by(|left, right| {
+        right
+            .modified_at
+            .cmp(&left.modified_at)
+            .then_with(|| right.file_name.cmp(&left.file_name))
+    });
+
+    // Return the filtered and sorted list.
+    Ok(reports)
+}
+
+// Check whether a file name belongs to an Azure inventory Markdown report.
+fn is_inventory_report_file_name(file_name: &str) -> bool {
+    // Require the generator's stable prefix so unrelated Markdown files stay hidden.
+    file_name.starts_with("azure-inventory-")
+        // Require the Markdown extension because generated reports are Markdown documents.
+        && file_name.ends_with(".md")
 }
 
 // Ask Azure CLI for all resource groups in the current subscription.
@@ -333,8 +447,14 @@ mod tests {
     // Import the helpers under test from the parent module.
     use super::{
         build_service_principal_login_arguments, decode_azure_cli_json_output,
-        parse_account_from_tsv,
+        list_inventory_reports_in_directory, parse_account_from_tsv,
     };
+    // Import filesystem helpers so tests can create isolated report directories.
+    use std::fs;
+    // Import environment helpers so tests can write below the system temporary directory.
+    use std::env;
+    // Import `Uuid` so every test directory gets a unique name.
+    use uuid::Uuid;
 
     #[test]
     fn parses_account_from_expected_tsv_output() {
@@ -399,5 +519,64 @@ mod tests {
 
         // Confirm that the invalid byte becomes the Unicode replacement character.
         assert_eq!(decoded_output, "{\"name\":\"stor\u{FFFD}age-account\"}");
+    }
+
+    #[test]
+    fn lists_inventory_reports_newest_first_and_ignores_unrelated_files() {
+        // Build an isolated temporary directory for this filesystem test.
+        let directory = env::temp_dir().join(format!(
+            "martijn-cli-inventory-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        // Create the temporary directory before writing report files into it.
+        fs::create_dir_all(&directory).expect("temporary directory should be created");
+
+        // Create an older-looking inventory report that should sort after the newer one.
+        let older_report = directory.join("azure-inventory-20260423-080734-11111111.md");
+        // Write small Markdown content so the file has metadata and a non-zero size.
+        fs::write(&older_report, "# Older report\n").expect("older report should be written");
+        // Create a newer-looking inventory report that should sort first.
+        let newer_report = directory.join("azure-inventory-20260424-072348-22222222.md");
+        // Write small Markdown content so the file has metadata and a non-zero size.
+        fs::write(&newer_report, "# Newer report\n").expect("newer report should be written");
+        // Create an unrelated Markdown file that should not appear in the listing.
+        fs::write(directory.join("notes.md"), "# Notes\n")
+            .expect("unrelated file should be written");
+
+        // Ask the listing helper to read, filter, and sort the temporary directory.
+        let reports =
+            list_inventory_reports_in_directory(&directory).expect("reports should be listed");
+
+        // Confirm that only files matching the inventory naming convention are returned.
+        assert_eq!(reports.len(), 2);
+        // Confirm that the newer report appears first in the listing.
+        assert_eq!(
+            reports[0].file_name,
+            "azure-inventory-20260424-072348-22222222.md"
+        );
+        // Confirm that the older report appears after the newer report.
+        assert_eq!(
+            reports[1].file_name,
+            "azure-inventory-20260423-080734-11111111.md"
+        );
+
+        // Clean up the temporary directory after the assertions complete.
+        fs::remove_dir_all(&directory).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    fn missing_inventory_directory_returns_an_empty_list() {
+        // Build a path that should not exist because it includes a fresh UUID.
+        let missing_directory = env::temp_dir().join(format!(
+            "martijn-cli-missing-inventory-test-{}",
+            Uuid::new_v4().simple()
+        ));
+
+        // Ask the listing helper to read the missing directory.
+        let reports = list_inventory_reports_in_directory(&missing_directory)
+            .expect("missing directory should not be an error");
+
+        // Confirm that a missing directory behaves like an empty inventory history.
+        assert!(reports.is_empty());
     }
 }
