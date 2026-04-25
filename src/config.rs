@@ -134,7 +134,7 @@ pub(crate) fn build_cli_directory_from_home(home_directory: &Path) -> PathBuf {
 }
 
 // Resolve the user's home directory in a way that works on Unix-like systems and Windows.
-fn resolve_home_directory() -> AppResult<PathBuf> {
+pub(crate) fn resolve_home_directory() -> AppResult<PathBuf> {
     // Check the Unix-style `HOME` variable first because it is the standard on Unix-like systems.
     if let Some(home) = std::env::var_os("HOME") {
         // Convert the environment value into a platform-aware path.

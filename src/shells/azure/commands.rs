@@ -24,6 +24,9 @@ pub(super) enum AzureCommand {
     /// Generate and list saved Azure inventory reports.
     #[command(subcommand, arg_required_else_help = true)]
     Inventory(InventoryCommand),
+    /// Generate JSON snapshots of Azure resources.
+    #[command(subcommand, arg_required_else_help = true)]
+    Snapshot(SnapshotCommand),
     /// Show the Azure shell help message.
     Help,
     /// Close the current shell session.
@@ -39,6 +42,13 @@ pub(super) enum InventoryCommand {
     /// List saved Azure inventory reports.
     #[command(alias = "ls")]
     List,
+}
+
+// List the commands that belong under the Azure `snapshot` command group.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub(super) enum SnapshotCommand {
+    /// Export a new JSON resource snapshot.
+    Generate,
 }
 
 // Hold the arguments that belong to the `login` subcommand.
@@ -71,7 +81,7 @@ mod tests {
     use clap::error::ErrorKind;
 
     // Import the Azure parser and command types so the tests can validate command behavior.
-    use super::{AzureCommand, InventoryCommand, LoginArguments, parse_command};
+    use super::{AzureCommand, InventoryCommand, LoginArguments, SnapshotCommand, parse_command};
 
     #[test]
     fn parses_login_with_one_tenant() {
@@ -240,6 +250,38 @@ mod tests {
             parsed_command,
             AzureCommand::Inventory(InventoryCommand::List)
         ));
+    }
+
+    #[test]
+    fn parses_snapshot_generate_as_a_real_command() {
+        // Parse the snapshot generation command that writes a new JSON file.
+        let parsed_command = parse_command(&[String::from("snapshot"), String::from("generate")])
+            .expect("command should parse");
+
+        // Confirm that Clap routes the nested command to the generate variant.
+        assert!(matches!(
+            parsed_command,
+            AzureCommand::Snapshot(SnapshotCommand::Generate)
+        ));
+    }
+
+    #[test]
+    fn snapshot_without_a_subcommand_shows_snapshot_help() {
+        // Parse the parent snapshot command without the required nested command.
+        let error = parse_command(&[String::from("snapshot")])
+            .expect_err("missing subcommand should show help");
+        // Render the Clap error into text so we can inspect the message.
+        let rendered_error = error.to_string();
+
+        // Confirm that Clap reports intentional help output for the missing subcommand.
+        assert_eq!(
+            error.kind(),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+        // Confirm that the snapshot command help shows the nested command usage.
+        assert!(rendered_error.contains("Usage: azure snapshot <COMMAND>"));
+        // Confirm that the snapshot command help lists the generate subcommand.
+        assert!(rendered_error.contains("generate"));
     }
 
     #[test]

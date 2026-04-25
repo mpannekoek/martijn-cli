@@ -4,15 +4,19 @@ mod commands;
 mod inventory;
 // Declare the login module so authentication flow and validation stay together.
 mod login;
+// Declare the snapshot module so JSON snapshot commands have a focused home.
+mod snapshot;
 // Declare the state module so cached Azure account handling stays together.
 mod state;
 
 // Import the typed command model used by the shell router.
-use commands::{AzureCommand, AzureShellCli, InventoryCommand, parse_command};
+use commands::{AzureCommand, AzureShellCli, InventoryCommand, SnapshotCommand, parse_command};
 // Import inventory command handlers that do the user-facing report work.
 use inventory::{handle_inventory_generate, handle_inventory_list};
 // Import the login handler that resolves arguments and calls Azure CLI.
 use login::{handle_login, handle_logout};
+// Import snapshot command handlers that do the user-facing JSON snapshot work.
+use snapshot::handle_snapshot_generate;
 // Import terminal color helpers so the intro stands out.
 use owo_colors::OwoColorize;
 // Import state helpers used by startup, status and intro rendering.
@@ -58,6 +62,10 @@ fn handle_command<'a>(state: &'a mut SessionState, tokens: &'a [String]) -> Comm
             Ok(AzureCommand::Inventory(InventoryCommand::List)) => {
                 // List the Markdown inventory reports already saved on disk.
                 handle_inventory_list();
+            }
+            Ok(AzureCommand::Snapshot(SnapshotCommand::Generate)) => {
+                // Build the JSON resource snapshot and save it to disk.
+                handle_snapshot_generate(state).await;
             }
             Ok(AzureCommand::Login(arguments)) => {
                 // Run the login flow after resolving CLI arguments and config defaults together.

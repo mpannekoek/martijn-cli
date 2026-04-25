@@ -7,6 +7,10 @@ use crate::azure::report::{
     build_inventory_file_name, count_total_resources, render_inventory_markdown,
     resolve_inventory_output_directory, sort_resource_groups, sort_resources,
 };
+// Import the Azure snapshot helpers used to normalize, render and locate JSON snapshots.
+use crate::azure::snapshot::{
+    build_snapshot_envelope, build_snapshot_file_name, resolve_snapshot_output_directory,
+};
 // Import the shared application result type.
 use crate::AppResult;
 // Import filesystem helpers so we can create directories and write files.
@@ -169,6 +173,43 @@ pub(crate) fn list_inventory_reports() -> AppResult<Vec<InventoryReportFile>> {
     list_inventory_reports_in_directory(&output_directory)
 }
 
+// Build the Azure resource snapshot, write it to disk and return the final path.
+pub(crate) async fn generate_resource_snapshot(account: &AzureAccount) -> AppResult<PathBuf> {
+    // Ask Azure CLI for every resource in the active subscription.
+    let raw_resources = fetch_raw_subscription_resources().await?;
+    // Convert the raw resources into the snapshot envelope with normalized fields and hashes.
+    let snapshot = build_snapshot_envelope(account, raw_resources)?;
+    // Serialize the snapshot as pretty JSON so humans can inspect it easily.
+    let snapshot_json = serde_json::to_string_pretty(&snapshot)
+        .map_err(|error| format!("unable to serialize the Azure snapshot JSON: {error}"))?;
+    // Resolve the target directory below the user's home directory.
+    let output_directory = resolve_snapshot_output_directory()?;
+
+    // Create the directory tree when it does not exist yet.
+    fs::create_dir_all(&output_directory).map_err(|error| {
+        format!(
+            "unable to create the snapshot output directory `{}`: {error}",
+            output_directory.display()
+        )
+    })?;
+
+    // Generate a unique filename so every run creates a new JSON document.
+    let file_name = build_snapshot_file_name();
+    // Join the directory and filename into the final full path.
+    let output_file_path = output_directory.join(file_name);
+
+    // Write the generated JSON to the target file.
+    fs::write(&output_file_path, snapshot_json).map_err(|error| {
+        format!(
+            "unable to write the snapshot file `{}`: {error}",
+            output_file_path.display()
+        )
+    })?;
+
+    // Return the full path to the newly created snapshot file.
+    Ok(output_file_path)
+}
+
 // List saved Azure inventory reports from one concrete directory.
 fn list_inventory_reports_in_directory(directory: &Path) -> AppResult<Vec<InventoryReportFile>> {
     // Try to open the directory and handle a missing directory as an empty list.
@@ -285,6 +326,18 @@ async fn fetch_resources_for_group(
 
     // Return the ready-to-use list.
     Ok(resources)
+}
+
+// Ask Azure CLI for all resources in the active subscription as raw JSON values.
+async fn fetch_raw_subscription_resources() -> AppResult<Vec<serde_json::Value>> {
+    // Capture JSON output because the snapshot must preserve Azure's raw resource objects.
+    let raw_json = run_az_json_command(&["resource", "list"]).await?;
+    // Parse the JSON text into flexible `Value` objects so unknown fields are preserved.
+    let raw_resources: Vec<serde_json::Value> = serde_json::from_str(&raw_json)
+        .map_err(|error| format!("Azure CLI returned invalid resource snapshot JSON: {error}"))?;
+
+    // Return the raw resources exactly as parsed from Azure CLI output.
+    Ok(raw_resources)
 }
 
 // Build the full inventory by pairing every resource group with its resources.

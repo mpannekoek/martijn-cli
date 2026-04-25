@@ -31,7 +31,7 @@ cargo run -- azure
 
 The CLI currently has two interactive shells:
 
-- `azure`: Azure login, logout, status, and inventory commands
+- `azure`: Azure login, logout, status, inventory, and snapshot commands
 - `dummy`: a minimal example shell used for learning and testing
 
 If you start the CLI without a subcommand, it opens the root shell. From there you can type `azure`, `dummy`, or `help`.
@@ -45,8 +45,31 @@ Inside the Azure shell, the main commands are:
 - `logout`
 - `status`
 - `inventory`
+- `snapshot`
 - `help`
 - `exit`
+
+### Snapshot behavior
+
+The Azure shell can write a JSON snapshot of all resources in the active subscription:
+
+```text
+snapshot generate
+```
+
+Snapshots are saved below:
+
+```text
+~/.martijn/cli/snapshot/
+```
+
+On Windows this resolves through the user's home directory, for example:
+
+```text
+%USERPROFILE%\.martijn\cli\snapshot\
+```
+
+Each resource entry contains normalized fields, a SHA-256 fingerprint of those normalized fields, and the original raw Azure JSON.
 
 ### Login behavior
 

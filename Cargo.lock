@@ -530,6 +530,7 @@ dependencies = [
  "owo-colors",
  "serde",
  "serde_json",
+ "sha2",
  "tera",
  "time",
  "tokio",

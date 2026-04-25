@@ -1,5 +1,8 @@
 // Import `Deserialize` so Azure CLI JSON can become typed Rust values.
-use serde::Deserialize;
+// Import `Serialize` so snapshot data can become JSON output.
+use serde::{Deserialize, Serialize};
+// Import `Value` so snapshots can keep flexible Azure JSON fields without losing data.
+use serde_json::Value;
 // Import `BTreeMap` so resource tags can be stored as key/value pairs.
 use std::collections::BTreeMap;
 
@@ -60,4 +63,61 @@ pub(crate) struct AzureInventoryGroup {
     pub(crate) resource_group: AzureResourceGroupReportItem,
     // Store the group's resources in display order.
     pub(crate) resources: Vec<AzureResourceReportItem>,
+}
+
+// Store the complete JSON document that is written for one Azure snapshot.
+#[derive(Debug, Serialize, PartialEq)]
+pub(crate) struct AzureSnapshotEnvelope {
+    // Rename this field to the camelCase JSON name requested by the snapshot format.
+    #[serde(rename = "generatedAt")]
+    pub(crate) generated_at: String,
+    // Store subscription metadata so the snapshot remains understandable later.
+    pub(crate) subscription: AzureSnapshotSubscription,
+    // Store every normalized resource together with its hash and original JSON.
+    pub(crate) resources: Vec<AzureSnapshotResource>,
+}
+
+// Store subscription metadata inside the snapshot envelope.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct AzureSnapshotSubscription {
+    // Store the active subscription ID under the short `id` JSON field.
+    pub(crate) id: String,
+    // Store the friendly subscription name returned by Azure CLI.
+    pub(crate) name: String,
+    // Store the Azure user or service principal used while creating the snapshot.
+    pub(crate) user: String,
+}
+
+// Store one resource entry inside the snapshot document.
+#[derive(Debug, Serialize, PartialEq)]
+pub(crate) struct AzureSnapshotResource {
+    // Store the stable subset used for comparisons and hashing.
+    pub(crate) normalized: AzureSnapshotNormalizedResource,
+    // Store the SHA-256 hash of the normalized JSON.
+    pub(crate) fingerprint: String,
+    // Store the original Azure CLI JSON object exactly as `serde_json` parsed it.
+    pub(crate) raw: Value,
+}
+
+// Store the stable resource shape used by snapshot consumers.
+#[derive(Debug, Serialize, PartialEq)]
+pub(crate) struct AzureSnapshotNormalizedResource {
+    // Store the Azure resource ID, or an empty string when Azure omitted it.
+    pub(crate) id: String,
+    // Store the resource name, or an empty string when Azure omitted it.
+    pub(crate) name: String,
+    // Rename this field because `type` is a Rust keyword but required in JSON.
+    #[serde(rename = "type")]
+    pub(crate) resource_type: String,
+    // Rename this field to match Azure's camelCase `resourceGroup` spelling.
+    #[serde(rename = "resourceGroup")]
+    pub(crate) resource_group: String,
+    // Store the Azure location, or an empty string when Azure omitted it.
+    pub(crate) location: String,
+    // Store `kind` as flexible JSON because Azure may return strings, null, or omit it.
+    pub(crate) kind: Value,
+    // Store `sku` as flexible JSON because Azure SKU shapes differ by resource type.
+    pub(crate) sku: Value,
+    // Store tags as JSON so keys and values stay exactly available to snapshot readers.
+    pub(crate) tags: Value,
 }
