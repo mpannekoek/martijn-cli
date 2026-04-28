@@ -21,12 +21,15 @@ pub(super) enum AzureCommand {
     Logout,
     /// Show the current Azure login state.
     Status,
-    /// Generate and list saved Azure inventory reports.
+    /// Show Azure inventory data and optionally save Markdown reports.
     #[command(subcommand, arg_required_else_help = true)]
     Inventory(InventoryCommand),
-    /// Generate JSON snapshots of Azure resources.
+    /// Create, list, and delete JSON snapshots.
     #[command(subcommand, arg_required_else_help = true)]
     Snapshot(SnapshotCommand),
+    /// List, show, and delete saved inventory reports.
+    #[command(subcommand, arg_required_else_help = true)]
+    Report(ReportCommand),
     /// Show the Azure shell help message.
     Help,
     /// Close the current shell session.
@@ -37,18 +40,70 @@ pub(super) enum AzureCommand {
 // List the commands that belong under the Azure `inventory` command group.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub(super) enum InventoryCommand {
-    /// Export a new Markdown inventory report.
-    Generate,
-    /// List saved Azure inventory reports.
-    #[command(alias = "ls")]
-    List,
+    /// Work with Azure resources.
+    #[command(subcommand, arg_required_else_help = true)]
+    Resources(InventoryResourcesCommand),
+    /// Work with Azure resource groups.
+    #[command(subcommand, arg_required_else_help = true)]
+    Groups(InventoryGroupsCommand),
+}
+
+// List the commands that belong under `inventory resources`.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub(super) enum InventoryResourcesCommand {
+    /// Print Azure resources as a compact list.
+    List(SaveArguments),
+    /// Print Azure resources grouped as a tree.
+    Tree(SaveArguments),
+}
+
+// List the commands that belong under `inventory groups`.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub(super) enum InventoryGroupsCommand {
+    /// Print Azure resource groups as a compact list.
+    List(SaveArguments),
 }
 
 // List the commands that belong under the Azure `snapshot` command group.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub(super) enum SnapshotCommand {
-    /// Export a new JSON resource snapshot.
-    Generate,
+    /// Create a new JSON snapshot.
+    #[command(subcommand, arg_required_else_help = true)]
+    Create(SnapshotCreateCommand),
+    /// List saved Azure snapshots.
+    List,
+    /// Delete one saved Azure snapshot by file name or stem.
+    Delete { name: String },
+}
+
+// List the commands that belong under `snapshot create`.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub(super) enum SnapshotCreateCommand {
+    /// Create a resource snapshot.
+    Resources,
+    /// Create a resource-group snapshot.
+    Groups,
+    /// Create both resource and resource-group snapshots.
+    All,
+}
+
+// List the commands that belong under the Azure `report` command group.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub(super) enum ReportCommand {
+    /// List saved Azure inventory reports.
+    List,
+    /// Print one saved Azure inventory report.
+    Show { name: String },
+    /// Delete one saved Azure inventory report.
+    Delete { name: String },
+}
+
+// Hold the optional `--save` value used by inventory commands.
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub(super) struct SaveArguments {
+    // Accept `--save` without a value and `--save <name>` with a custom name.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub(super) save: Option<String>,
 }
 
 // Hold the arguments that belong to the `login` subcommand.
@@ -81,7 +136,11 @@ mod tests {
     use clap::error::ErrorKind;
 
     // Import the Azure parser and command types so the tests can validate command behavior.
-    use super::{AzureCommand, InventoryCommand, LoginArguments, SnapshotCommand, parse_command};
+    use super::{
+        AzureCommand, InventoryCommand, InventoryGroupsCommand, InventoryResourcesCommand,
+        LoginArguments, ReportCommand, SaveArguments, SnapshotCommand, SnapshotCreateCommand,
+        parse_command,
+    };
 
     #[test]
     fn parses_login_with_one_tenant() {
@@ -214,54 +273,180 @@ mod tests {
     }
 
     #[test]
-    fn parses_inventory_generate_as_a_real_command() {
-        // Parse the inventory generation command that writes a new report.
-        let parsed_command = parse_command(&[String::from("inventory"), String::from("generate")])
-            .expect("command should parse");
+    fn parses_inventory_resources_list_without_save() {
+        // Parse the resources list command without saving a report.
+        let parsed_command = parse_command(&[
+            String::from("inventory"),
+            String::from("resources"),
+            String::from("list"),
+        ])
+        .expect("command should parse");
 
-        // Confirm that Clap routes the nested command to the generate variant.
+        // Confirm that Clap routes the nested command to the resources list variant.
         assert!(matches!(
             parsed_command,
-            AzureCommand::Inventory(InventoryCommand::Generate)
+            AzureCommand::Inventory(InventoryCommand::Resources(
+                InventoryResourcesCommand::List(SaveArguments { save: None })
+            ))
         ));
     }
 
     #[test]
-    fn parses_inventory_list_as_a_real_command() {
-        // Parse the inventory list command that shows saved reports.
-        let parsed_command = parse_command(&[String::from("inventory"), String::from("list")])
-            .expect("command should parse");
+    fn parses_inventory_resources_tree_with_bare_save() {
+        // Parse the resources tree command with `--save` but no custom name.
+        let parsed_command = parse_command(&[
+            String::from("inventory"),
+            String::from("resources"),
+            String::from("tree"),
+            String::from("--save"),
+        ])
+        .expect("command should parse");
 
-        // Confirm that Clap routes the nested command to the list variant.
+        // Confirm that Clap stores an empty string for the optional save value.
         assert!(matches!(
             parsed_command,
-            AzureCommand::Inventory(InventoryCommand::List)
+            AzureCommand::Inventory(InventoryCommand::Resources(
+                InventoryResourcesCommand::Tree(SaveArguments { save: Some(name) })
+            )) if name.is_empty()
         ));
     }
 
     #[test]
-    fn parses_inventory_ls_as_an_alias_for_list() {
-        // Parse the short inventory alias that should behave like `inventory list`.
-        let parsed_command = parse_command(&[String::from("inventory"), String::from("ls")])
-            .expect("command should parse");
+    fn parses_inventory_groups_list_with_named_save() {
+        // Parse the groups list command with a custom report name.
+        let parsed_command = parse_command(&[
+            String::from("inventory"),
+            String::from("groups"),
+            String::from("list"),
+            String::from("--save"),
+            String::from("daily report"),
+        ])
+        .expect("command should parse");
 
-        // Confirm that the alias resolves to the same typed list variant.
+        // Confirm that Clap keeps the provided report name.
         assert!(matches!(
             parsed_command,
-            AzureCommand::Inventory(InventoryCommand::List)
+            AzureCommand::Inventory(InventoryCommand::Groups(
+                InventoryGroupsCommand::List(SaveArguments { save: Some(name) })
+            )) if name == "daily report"
         ));
     }
 
     #[test]
-    fn parses_snapshot_generate_as_a_real_command() {
-        // Parse the snapshot generation command that writes a new JSON file.
-        let parsed_command = parse_command(&[String::from("snapshot"), String::from("generate")])
-            .expect("command should parse");
+    fn parses_snapshot_create_resources_as_a_real_command() {
+        // Parse the snapshot command that writes a resource snapshot.
+        let parsed_command = parse_command(&[
+            String::from("snapshot"),
+            String::from("create"),
+            String::from("resources"),
+        ])
+        .expect("command should parse");
 
-        // Confirm that Clap routes the nested command to the generate variant.
+        // Confirm that Clap routes the nested command to the create resources variant.
         assert!(matches!(
             parsed_command,
-            AzureCommand::Snapshot(SnapshotCommand::Generate)
+            AzureCommand::Snapshot(SnapshotCommand::Create(SnapshotCreateCommand::Resources))
+        ));
+    }
+
+    #[test]
+    fn parses_snapshot_create_groups_as_a_real_command() {
+        // Parse the snapshot command that writes a group snapshot.
+        let parsed_command = parse_command(&[
+            String::from("snapshot"),
+            String::from("create"),
+            String::from("groups"),
+        ])
+        .expect("command should parse");
+
+        // Confirm that Clap routes the nested command to the create groups variant.
+        assert!(matches!(
+            parsed_command,
+            AzureCommand::Snapshot(SnapshotCommand::Create(SnapshotCreateCommand::Groups))
+        ));
+    }
+
+    #[test]
+    fn parses_snapshot_create_all_as_a_real_command() {
+        // Parse the snapshot command that writes both snapshot types.
+        let parsed_command = parse_command(&[
+            String::from("snapshot"),
+            String::from("create"),
+            String::from("all"),
+        ])
+        .expect("command should parse");
+
+        // Confirm that Clap routes the nested command to the create all variant.
+        assert!(matches!(
+            parsed_command,
+            AzureCommand::Snapshot(SnapshotCommand::Create(SnapshotCreateCommand::All))
+        ));
+    }
+
+    #[test]
+    fn parses_snapshot_list_as_a_real_command() {
+        // Parse the snapshot list command.
+        let parsed_command = parse_command(&[String::from("snapshot"), String::from("list")])
+            .expect("command should parse");
+
+        // Confirm that Clap routes the command to the list variant.
+        assert!(matches!(
+            parsed_command,
+            AzureCommand::Snapshot(SnapshotCommand::List)
+        ));
+    }
+
+    #[test]
+    fn parses_snapshot_delete_with_name() {
+        // Parse the snapshot delete command with a target name.
+        let parsed_command = parse_command(&[
+            String::from("snapshot"),
+            String::from("delete"),
+            String::from("daily"),
+        ])
+        .expect("command should parse");
+
+        // Confirm that Clap keeps the provided delete name.
+        assert!(matches!(
+            parsed_command,
+            AzureCommand::Snapshot(SnapshotCommand::Delete { name }) if name == "daily"
+        ));
+    }
+
+    #[test]
+    fn parses_report_commands() {
+        // Parse the report list command.
+        let list_command = parse_command(&[String::from("report"), String::from("list")])
+            .expect("report list should parse");
+        // Parse the report show command.
+        let show_command = parse_command(&[
+            String::from("report"),
+            String::from("show"),
+            String::from("daily"),
+        ])
+        .expect("report show should parse");
+        // Parse the report delete command.
+        let delete_command = parse_command(&[
+            String::from("report"),
+            String::from("delete"),
+            String::from("daily"),
+        ])
+        .expect("report delete should parse");
+
+        // Confirm that report list reaches the list variant.
+        assert!(matches!(
+            list_command,
+            AzureCommand::Report(ReportCommand::List)
+        ));
+        // Confirm that report show keeps the provided name.
+        assert!(matches!(
+            show_command,
+            AzureCommand::Report(ReportCommand::Show { name }) if name == "daily"
+        ));
+        // Confirm that report delete keeps the provided name.
+        assert!(matches!(
+            delete_command,
+            AzureCommand::Report(ReportCommand::Delete { name }) if name == "daily"
         ));
     }
 
@@ -280,8 +465,8 @@ mod tests {
         );
         // Confirm that the snapshot command help shows the nested command usage.
         assert!(rendered_error.contains("Usage: azure snapshot <COMMAND>"));
-        // Confirm that the snapshot command help lists the generate subcommand.
-        assert!(rendered_error.contains("generate"));
+        // Confirm that the snapshot command help lists the create subcommand.
+        assert!(rendered_error.contains("create"));
     }
 
     #[test]
@@ -299,17 +484,18 @@ mod tests {
         );
         // Confirm that the inventory command help shows the nested command usage.
         assert!(rendered_error.contains("Usage: azure inventory <COMMAND>"));
-        // Confirm that the inventory command help lists the generate subcommand.
-        assert!(rendered_error.contains("generate"));
-        // Confirm that the inventory command help lists the list subcommand.
-        assert!(rendered_error.contains("list"));
+        // Confirm that the inventory command help lists the resources subcommand.
+        assert!(rendered_error.contains("resources"));
+        // Confirm that the inventory command help lists the groups subcommand.
+        assert!(rendered_error.contains("groups"));
     }
 
     #[test]
-    fn inventory_list_help_is_reported_as_display_help() {
-        // Parse `inventory list -h`, which Clap represents as a help display request.
+    fn inventory_resources_list_help_is_reported_as_display_help() {
+        // Parse `inventory resources list -h`, which Clap represents as a help display request.
         let error = parse_command(&[
             String::from("inventory"),
+            String::from("resources"),
             String::from("list"),
             String::from("-h"),
         ])
@@ -320,10 +506,11 @@ mod tests {
     }
 
     #[test]
-    fn inventory_list_help_describes_saved_report_listing() {
-        // Ask Clap to render the help text for the inventory list subcommand.
+    fn inventory_resources_list_help_describes_resource_listing() {
+        // Ask Clap to render the help text for the inventory resources list subcommand.
         let error = parse_command(&[
             String::from("inventory"),
+            String::from("resources"),
             String::from("list"),
             String::from("-h"),
         ])
@@ -331,7 +518,7 @@ mod tests {
         // Convert the rendered help into a string so the test can inspect it.
         let rendered_help = error.to_string();
 
-        // Confirm that the help text describes listing saved inventory reports.
-        assert!(rendered_help.contains("List saved Azure inventory reports"));
+        // Confirm that the help text describes listing Azure resources.
+        assert!(rendered_help.contains("Print Azure resources as a compact list"));
     }
 }

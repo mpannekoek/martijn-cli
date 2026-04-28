@@ -1,6 +1,7 @@
 // Import the snapshot model types that describe the JSON output.
 use crate::azure::model::{
-    AzureAccount, AzureSnapshotEnvelope, AzureSnapshotNormalizedResource, AzureSnapshotResource,
+    AzureAccount, AzureGroupSnapshotEnvelope, AzureSnapshotEnvelope, AzureSnapshotGroup,
+    AzureSnapshotNormalizedGroup, AzureSnapshotNormalizedResource, AzureSnapshotResource,
     AzureSnapshotSubscription,
 };
 // Import the shared CLI-directory resolver so snapshot paths match config and inventory paths.
@@ -59,6 +60,38 @@ pub(crate) fn build_snapshot_envelope(
     })
 }
 
+// Build the full group snapshot JSON envelope from an Azure account and raw group list.
+pub(crate) fn build_group_snapshot_envelope(
+    account: &AzureAccount,
+    raw_groups: Vec<Value>,
+) -> AppResult<AzureGroupSnapshotEnvelope> {
+    // Capture the current UTC time once so metadata is consistent for the whole file.
+    let generated_at = OffsetDateTime::now_utc();
+    // Format the timestamp with a standard JSON-friendly representation.
+    let generated_at_display = generated_at.format(&Rfc3339).map_err(|error| {
+        format!("unable to format the group snapshot generation timestamp: {error}")
+    })?;
+
+    // Convert raw Azure groups into normalized snapshot entries.
+    let mut groups = build_snapshot_groups(raw_groups)?;
+    // Sort entries after normalization so output stays deterministic between runs.
+    sort_snapshot_groups(&mut groups);
+
+    // Build the small subscription block from the active account information.
+    let subscription = AzureSnapshotSubscription {
+        id: account.subscription_id.clone(),
+        name: account.name.clone(),
+        user: account.user.clone(),
+    };
+
+    // Return the complete serializable group snapshot document.
+    Ok(AzureGroupSnapshotEnvelope {
+        generated_at: generated_at_display,
+        subscription,
+        groups,
+    })
+}
+
 // Convert all raw Azure resources into snapshot entries.
 fn build_snapshot_resources(raw_resources: Vec<Value>) -> AppResult<Vec<AzureSnapshotResource>> {
     // Allocate the output vector with enough room for every incoming resource.
@@ -82,6 +115,30 @@ fn build_snapshot_resources(raw_resources: Vec<Value>) -> AppResult<Vec<AzureSna
 
     // Return all prepared resources.
     Ok(snapshot_resources)
+}
+
+// Convert all raw Azure resource groups into snapshot entries.
+fn build_snapshot_groups(raw_groups: Vec<Value>) -> AppResult<Vec<AzureSnapshotGroup>> {
+    // Allocate the output vector with enough room for every incoming group.
+    let mut snapshot_groups: Vec<AzureSnapshotGroup> = Vec::with_capacity(raw_groups.len());
+
+    // Walk through every raw value so each group can keep its original JSON.
+    for raw_group in raw_groups {
+        // Build the stable normalized view from the current raw Azure object.
+        let normalized = normalize_snapshot_group(&raw_group);
+        // Hash the normalized view before moving it into the snapshot entry.
+        let fingerprint = fingerprint_normalized_group(&normalized)?;
+
+        // Store normalized data, its fingerprint, and the original raw JSON together.
+        snapshot_groups.push(AzureSnapshotGroup {
+            normalized,
+            fingerprint,
+            raw: raw_group,
+        });
+    }
+
+    // Return all prepared groups.
+    Ok(snapshot_groups)
 }
 
 // Build the stable normalized resource shape from raw Azure JSON.
@@ -116,6 +173,32 @@ pub(crate) fn normalize_snapshot_resource(raw_resource: &Value) -> AzureSnapshot
         kind,
         sku,
         tags,
+    }
+}
+
+// Build the stable normalized group shape from raw Azure JSON.
+pub(crate) fn normalize_snapshot_group(raw_group: &Value) -> AzureSnapshotNormalizedGroup {
+    // Store an object reference when Azure returned an object, or `None` for other JSON types.
+    let raw_object = raw_group.as_object();
+
+    // Read required string fields explicitly so missing values become empty strings.
+    let id = read_string_field(raw_object, "id");
+    // Read the resource group name from Azure's `name` field.
+    let name = read_string_field(raw_object, "name");
+    // Read the region or keep an empty string when Azure omitted it.
+    let location = read_string_field(raw_object, "location");
+    // Clone tags only when they are an object, otherwise use an empty object.
+    let tags = read_tags_field_or_empty_object(raw_object);
+    // Clone managed-by metadata as JSON because Azure often returns null here.
+    let managed_by = read_json_field_or_null(raw_object, "managedBy");
+
+    // Return the exact normalized field set requested for group snapshots.
+    AzureSnapshotNormalizedGroup {
+        id,
+        name,
+        location,
+        tags,
+        managed_by,
     }
 }
 
@@ -219,6 +302,31 @@ pub(crate) fn fingerprint_normalized_resource(
     Ok(fingerprint)
 }
 
+// Calculate the SHA-256 fingerprint for one normalized resource group.
+pub(crate) fn fingerprint_normalized_group(
+    normalized: &AzureSnapshotNormalizedGroup,
+) -> AppResult<String> {
+    // Serialize the normalized struct into stable compact JSON bytes.
+    let normalized_json = serde_json::to_vec(normalized)
+        .map_err(|error| format!("unable to serialize normalized snapshot group: {error}"))?;
+    // Create a fresh SHA-256 hasher for this one group.
+    let mut hasher = Sha256::new();
+    // Feed the normalized JSON bytes into the hasher by borrowing the byte vector.
+    hasher.update(&normalized_json);
+    // Finish the hash calculation and receive the raw hash bytes.
+    let hash_bytes = hasher.finalize();
+    // Prepare a lowercase hexadecimal string with two characters for every byte.
+    let mut fingerprint = String::with_capacity(hash_bytes.len() * 2);
+
+    // Convert every hash byte into lowercase hexadecimal text.
+    for byte in hash_bytes {
+        fingerprint.push_str(&format!("{byte:02x}"));
+    }
+
+    // Return the final 64-character SHA-256 fingerprint.
+    Ok(fingerprint)
+}
+
 // Sort snapshot resources by stable human-readable keys.
 fn sort_snapshot_resources(resources: &mut [AzureSnapshotResource]) {
     // Compare normalized fields in the requested deterministic order.
@@ -255,12 +363,45 @@ fn compare_snapshot_resources(
         })
 }
 
+// Sort snapshot groups by stable human-readable keys.
+fn sort_snapshot_groups(groups: &mut [AzureSnapshotGroup]) {
+    // Compare normalized fields in the requested deterministic order.
+    groups.sort_by(|left, right| compare_snapshot_groups(left, right));
+}
+
+// Compare two snapshot groups using name and then ID.
+fn compare_snapshot_groups(left: &AzureSnapshotGroup, right: &AzureSnapshotGroup) -> Ordering {
+    // Lowercase each sort key so differences in casing do not reshuffle output.
+    left.normalized
+        .name
+        .to_lowercase()
+        .cmp(&right.normalized.name.to_lowercase())
+        .then_with(|| {
+            left.normalized
+                .id
+                .to_lowercase()
+                .cmp(&right.normalized.id.to_lowercase())
+        })
+}
+
 // Resolve the final snapshot output directory inside the shared CLI folder.
 pub(crate) fn resolve_snapshot_output_directory() -> AppResult<PathBuf> {
     // Resolve `~/.martijn/cli` once so snapshot files live beside the other CLI data.
     let cli_directory = resolve_cli_directory()?;
     // Append the fixed snapshot folder below the shared CLI directory.
     Ok(cli_directory.join("snapshot"))
+}
+
+// Resolve the final resource snapshot output directory.
+pub(crate) fn resolve_resource_snapshot_output_directory() -> AppResult<PathBuf> {
+    // Append the resource subtype below the shared snapshot directory.
+    Ok(resolve_snapshot_output_directory()?.join("resources"))
+}
+
+// Resolve the final group snapshot output directory.
+pub(crate) fn resolve_group_snapshot_output_directory() -> AppResult<PathBuf> {
+    // Append the group subtype below the shared snapshot directory.
+    Ok(resolve_snapshot_output_directory()?.join("groups"))
 }
 
 // Append the fixed `.martijn/cli/snapshot` directory under a known home directory.
@@ -270,8 +411,22 @@ pub(crate) fn build_snapshot_output_directory_from_home(home_directory: &Path) -
     home_directory.join(".martijn").join("cli").join("snapshot")
 }
 
-// Build a unique snapshot filename that includes a timestamp and a short UUID fragment.
-pub(crate) fn build_snapshot_file_name() -> String {
+// Append `.martijn/cli/snapshot/resources` under a known home directory.
+#[cfg(test)]
+pub(crate) fn build_resource_snapshot_output_directory_from_home(home_directory: &Path) -> PathBuf {
+    // Reuse the base snapshot helper and append the subtype segment.
+    build_snapshot_output_directory_from_home(home_directory).join("resources")
+}
+
+// Append `.martijn/cli/snapshot/groups` under a known home directory.
+#[cfg(test)]
+pub(crate) fn build_group_snapshot_output_directory_from_home(home_directory: &Path) -> PathBuf {
+    // Reuse the base snapshot helper and append the subtype segment.
+    build_snapshot_output_directory_from_home(home_directory).join("groups")
+}
+
+// Build a unique snapshot filename for one snapshot kind.
+pub(crate) fn build_named_snapshot_file_name(snapshot_kind: &str) -> String {
     // Capture the current UTC time for the timestamp part of the filename.
     let now = OffsetDateTime::now_utc();
     // Describe the compact timestamp format used in the filename.
@@ -285,16 +440,18 @@ pub(crate) fn build_snapshot_file_name() -> String {
     // Keep only the first eight characters so the filename stays compact.
     let short_unique_id = &unique_id[..8];
 
-    // Return the final filename with the required prefix and `.json` extension.
-    format!("azure-snapshot-{timestamp}-{short_unique_id}.json")
+    // Return the final filename with the kind in the prefix and `.json` extension.
+    format!("azure-snapshot-{snapshot_kind}-{timestamp}-{short_unique_id}.json")
 }
 
 #[cfg(test)]
 mod tests {
     // Import the snapshot helpers that these tests verify.
     use super::{
-        build_snapshot_file_name, build_snapshot_output_directory_from_home,
-        fingerprint_normalized_resource, normalize_snapshot_resource,
+        build_group_snapshot_output_directory_from_home, build_named_snapshot_file_name,
+        build_resource_snapshot_output_directory_from_home,
+        build_snapshot_output_directory_from_home, fingerprint_normalized_resource,
+        normalize_snapshot_resource,
     };
     // Import `json` so tests can build representative Azure JSON values clearly.
     use serde_json::json;
@@ -405,13 +562,43 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_file_name_uses_expected_prefix_and_extension() {
+    fn snapshot_file_name_uses_expected_kind_prefix_and_extension() {
         // Build one generated filename.
-        let file_name = build_snapshot_file_name();
+        let file_name = build_named_snapshot_file_name("resources");
 
         // Confirm that the filename uses the expected prefix.
-        assert!(file_name.starts_with("azure-snapshot-"));
+        assert!(file_name.starts_with("azure-snapshot-resources-"));
         // Confirm that the filename ends with the JSON extension.
         assert!(file_name.ends_with(".json"));
+    }
+
+    #[test]
+    fn snapshot_subdirectories_build_under_snapshot_directory() {
+        // Build a fake Unix-style home path for the path helper.
+        let home_directory = PathBuf::from("/home/martijn");
+        // Build the resource snapshot directory from that home path.
+        let resource_directory =
+            build_resource_snapshot_output_directory_from_home(&home_directory);
+        // Build the group snapshot directory from that home path.
+        let group_directory = build_group_snapshot_output_directory_from_home(&home_directory);
+
+        // Confirm that resource snapshots use the requested subtype directory.
+        assert_eq!(
+            resource_directory,
+            home_directory
+                .join(".martijn")
+                .join("cli")
+                .join("snapshot")
+                .join("resources")
+        );
+        // Confirm that group snapshots use the requested subtype directory.
+        assert_eq!(
+            group_directory,
+            home_directory
+                .join(".martijn")
+                .join("cli")
+                .join("snapshot")
+                .join("groups")
+        );
     }
 }

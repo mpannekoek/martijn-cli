@@ -10,13 +10,23 @@ mod snapshot;
 mod state;
 
 // Import the typed command model used by the shell router.
-use commands::{AzureCommand, AzureShellCli, InventoryCommand, SnapshotCommand, parse_command};
+use commands::{
+    AzureCommand, AzureShellCli, InventoryCommand, InventoryGroupsCommand,
+    InventoryResourcesCommand, ReportCommand, SnapshotCommand, SnapshotCreateCommand,
+    parse_command,
+};
 // Import inventory command handlers that do the user-facing report work.
-use inventory::{handle_inventory_generate, handle_inventory_list};
+use inventory::{
+    handle_inventory_groups_list, handle_inventory_resources_list, handle_inventory_resources_tree,
+    handle_report_delete, handle_report_list, handle_report_show,
+};
 // Import the login handler that resolves arguments and calls Azure CLI.
 use login::{handle_login, handle_logout};
 // Import snapshot command handlers that do the user-facing JSON snapshot work.
-use snapshot::handle_snapshot_generate;
+use snapshot::{
+    handle_snapshot_create_all, handle_snapshot_create_groups, handle_snapshot_create_resources,
+    handle_snapshot_delete, handle_snapshot_list,
+};
 // Import terminal color helpers so the intro stands out.
 use owo_colors::OwoColorize;
 // Import state helpers used by startup, status and intro rendering.
@@ -55,17 +65,57 @@ fn handle_command<'a>(state: &'a mut SessionState, tokens: &'a [String]) -> Comm
                 // Refresh the cached account information before showing it.
                 refresh_and_print_status(state).await;
             }
-            Ok(AzureCommand::Inventory(InventoryCommand::Generate)) => {
-                // Build the Markdown inventory report and save it to disk.
-                handle_inventory_generate(state).await;
+            Ok(AzureCommand::Inventory(InventoryCommand::Resources(
+                InventoryResourcesCommand::List(arguments),
+            ))) => {
+                // Print resources and optionally save the output as a Markdown report.
+                handle_inventory_resources_list(state, &arguments).await;
             }
-            Ok(AzureCommand::Inventory(InventoryCommand::List)) => {
-                // List the Markdown inventory reports already saved on disk.
-                handle_inventory_list();
+            Ok(AzureCommand::Inventory(InventoryCommand::Resources(
+                InventoryResourcesCommand::Tree(arguments),
+            ))) => {
+                // Print resources as a tree and optionally save a Markdown report.
+                handle_inventory_resources_tree(state, &arguments).await;
             }
-            Ok(AzureCommand::Snapshot(SnapshotCommand::Generate)) => {
+            Ok(AzureCommand::Inventory(InventoryCommand::Groups(
+                InventoryGroupsCommand::List(arguments),
+            ))) => {
+                // Print resource groups and optionally save the output as a Markdown report.
+                handle_inventory_groups_list(state, &arguments).await;
+            }
+            Ok(AzureCommand::Snapshot(SnapshotCommand::Create(
+                SnapshotCreateCommand::Resources,
+            ))) => {
                 // Build the JSON resource snapshot and save it to disk.
-                handle_snapshot_generate(state).await;
+                handle_snapshot_create_resources(state).await;
+            }
+            Ok(AzureCommand::Snapshot(SnapshotCommand::Create(SnapshotCreateCommand::Groups))) => {
+                // Build the JSON resource-group snapshot and save it to disk.
+                handle_snapshot_create_groups(state).await;
+            }
+            Ok(AzureCommand::Snapshot(SnapshotCommand::Create(SnapshotCreateCommand::All))) => {
+                // Build both JSON snapshot types and save them to disk.
+                handle_snapshot_create_all(state).await;
+            }
+            Ok(AzureCommand::Snapshot(SnapshotCommand::List)) => {
+                // List saved JSON snapshots from disk.
+                handle_snapshot_list();
+            }
+            Ok(AzureCommand::Snapshot(SnapshotCommand::Delete { name })) => {
+                // Delete one saved JSON snapshot by user-provided name.
+                handle_snapshot_delete(&name);
+            }
+            Ok(AzureCommand::Report(ReportCommand::List)) => {
+                // List saved Markdown inventory reports from disk.
+                handle_report_list();
+            }
+            Ok(AzureCommand::Report(ReportCommand::Show { name })) => {
+                // Print one saved Markdown inventory report.
+                handle_report_show(&name);
+            }
+            Ok(AzureCommand::Report(ReportCommand::Delete { name })) => {
+                // Delete one saved Markdown inventory report by user-provided name.
+                handle_report_delete(&name);
             }
             Ok(AzureCommand::Login(arguments)) => {
                 // Run the login flow after resolving CLI arguments and config defaults together.

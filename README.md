@@ -44,32 +44,83 @@ Inside the Azure shell, the main commands are:
 - `login --service-principal [--client-id <uuid>] [--client-secret <secret>] [tenant]`
 - `logout`
 - `status`
-- `inventory`
-- `snapshot`
+- `inventory resources list [--save [name]]`
+- `inventory resources tree [--save [name]]`
+- `inventory groups list [--save [name]]`
+- `snapshot create resources`
+- `snapshot create groups`
+- `snapshot create all`
+- `snapshot list`
+- `snapshot delete <name>`
+- `report list`
+- `report show <name>`
+- `report delete <name>`
 - `help`
 - `exit`
 
-### Snapshot behavior
+### Inventory behavior
 
-The Azure shell can write a JSON snapshot of all resources in the active subscription:
+The inventory commands print human-readable output to the terminal by default:
 
 ```text
-snapshot generate
+inventory resources list
+inventory resources tree
+inventory groups list
+```
+
+Add `--save` to also write a Markdown report with an automatic name:
+
+```text
+inventory resources list --save
+```
+
+Add `--save <name>` to choose a safe report name:
+
+```text
+inventory groups list --save daily-groups
+```
+
+Reports are saved below:
+
+```text
+~/.martijn/cli/inventory/resources/list/
+~/.martijn/cli/inventory/resources/tree/
+~/.martijn/cli/inventory/groups/list/
+```
+
+Use the report commands to manage saved inventory reports:
+
+```text
+report list
+report show daily-groups
+report delete daily-groups
+```
+
+### Snapshot behavior
+
+The Azure shell can write JSON snapshots for resources, resource groups, or both:
+
+```text
+snapshot create resources
+snapshot create groups
+snapshot create all
 ```
 
 Snapshots are saved below:
 
 ```text
-~/.martijn/cli/snapshot/
+~/.martijn/cli/snapshot/resources/
+~/.martijn/cli/snapshot/groups/
 ```
 
 On Windows this resolves through the user's home directory, for example:
 
 ```text
-%USERPROFILE%\.martijn\cli\snapshot\
+%USERPROFILE%\.martijn\cli\snapshot\resources\
+%USERPROFILE%\.martijn\cli\snapshot\groups\
 ```
 
-Each resource entry contains normalized fields, a SHA-256 fingerprint of those normalized fields, and the original raw Azure JSON.
+Use `snapshot list` and `snapshot delete <name>` to manage saved snapshots. Each snapshot entry contains normalized fields, a SHA-256 fingerprint of those normalized fields, and the original raw Azure JSON.
 
 ### Login behavior
 

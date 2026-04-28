@@ -1,3 +1,6 @@
+// Allow the older full-inventory Markdown renderer to stay available for learning and tests.
+#![allow(dead_code)]
+
 // Import the Azure data model types used by the renderer.
 use crate::azure::model::{
     AzureAccount, AzureInventoryGroup, AzureResourceGroupReportItem, AzureResourceReportItem,

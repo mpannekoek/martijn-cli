@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 // Import `BTreeMap` so resource tags can be stored as key/value pairs.
 use std::collections::BTreeMap;
+// Import `BTreeMap` so resource tags can be stored as key/value pairs.
 
 // Hold the account details that the shell shows in `status`.
 #[derive(Debug, Clone)]
@@ -99,6 +100,29 @@ pub(crate) struct AzureSnapshotResource {
     pub(crate) raw: Value,
 }
 
+// Store one resource-group entry inside a group snapshot document.
+#[derive(Debug, Serialize, PartialEq)]
+pub(crate) struct AzureSnapshotGroup {
+    // Store the stable subset used for comparisons and hashing.
+    pub(crate) normalized: AzureSnapshotNormalizedGroup,
+    // Store the SHA-256 hash of the normalized JSON.
+    pub(crate) fingerprint: String,
+    // Store the original Azure CLI JSON object exactly as `serde_json` parsed it.
+    pub(crate) raw: Value,
+}
+
+// Store the complete JSON document that is written for one group snapshot.
+#[derive(Debug, Serialize, PartialEq)]
+pub(crate) struct AzureGroupSnapshotEnvelope {
+    // Rename this field to the camelCase JSON name used by snapshot metadata.
+    #[serde(rename = "generatedAt")]
+    pub(crate) generated_at: String,
+    // Store subscription metadata so the snapshot remains understandable later.
+    pub(crate) subscription: AzureSnapshotSubscription,
+    // Store every normalized group together with its hash and original JSON.
+    pub(crate) groups: Vec<AzureSnapshotGroup>,
+}
+
 // Store the stable resource shape used by snapshot consumers.
 #[derive(Debug, Serialize, PartialEq)]
 pub(crate) struct AzureSnapshotNormalizedResource {
@@ -120,4 +144,20 @@ pub(crate) struct AzureSnapshotNormalizedResource {
     pub(crate) sku: Value,
     // Store tags as JSON so keys and values stay exactly available to snapshot readers.
     pub(crate) tags: Value,
+}
+
+// Store the stable resource-group shape used by snapshot consumers.
+#[derive(Debug, Serialize, PartialEq)]
+pub(crate) struct AzureSnapshotNormalizedGroup {
+    // Store the Azure resource-group ID, or an empty string when Azure omitted it.
+    pub(crate) id: String,
+    // Store the group name, or an empty string when Azure omitted it.
+    pub(crate) name: String,
+    // Store the Azure location, or an empty string when Azure omitted it.
+    pub(crate) location: String,
+    // Store tags as JSON so keys and values stay exactly available to snapshot readers.
+    pub(crate) tags: Value,
+    // Store managed-by metadata as JSON because Azure may omit it or return null.
+    #[serde(rename = "managedBy")]
+    pub(crate) managed_by: Value,
 }
