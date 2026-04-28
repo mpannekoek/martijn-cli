@@ -38,8 +38,8 @@ async fn main() -> AppResult<()> {
             commands::dummy::run_command(command)?;
         }
         None => {
-            // Show only the lightweight interactive start screen when no command is provided.
-            interactive::print_start_screen();
+            // Run the keyboard-driven interactive start screen when no command is provided.
+            interactive::run_start_screen()?;
         }
     }
 

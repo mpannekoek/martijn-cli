@@ -1,6 +1,6 @@
 # martijn-cli
 
-`martijn-cli` is a small Rust CLI workspace with non-interactive commands and a tiny startup screen.
+`martijn-cli` is a small Rust CLI workspace with non-interactive commands and a keyboard-driven startup menu.
 
 This repository is both a working tool and a learning project. The code is intentionally written in a clear, step-by-step style so it stays approachable for people who are learning Rust.
 
@@ -21,13 +21,19 @@ Run the binary directly:
 cargo run
 ```
 
-Running the binary without a command shows the temporary interactive start screen:
+Running the binary without a command opens the interactive keyboard menu:
 
 ```text
 MARTIJN CLI
 Welcome to Martijn CLI. Ready when you are. 🚀
 Run `martijn --help` to see available commands.
+Wat wil je doen?
+> Azure gerelateerde taken
+  Dummy gerelateerde taken
 ```
+
+Use the arrow keys to move, Enter to open a category, and Esc or `q` to go back or exit.
+The current submenus show command examples only; they do not run tasks yet.
 
 Run Azure tasks as normal CLI commands:
 

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.39", features = ["derive"] }
+crossterm = "0.29.0"
 figlet-rs = "0.1.5"
 owo-colors = "4.1.0"
 serde = { version = "1.0", features = ["derive"] }
