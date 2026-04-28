@@ -1,9 +1,9 @@
-// Import the Azure account model that this shell caches and displays.
+// Import the Azure account model that the CLI caches and displays.
 use crate::azure::model::AzureAccount;
 // Import the Azure service helper that reads the current account from Azure CLI.
 use crate::azure::service::fetch_azure_account;
 
-// Keep the Azure shell's mutable state in one place.
+// Keep the Azure command state in one place.
 #[derive(Debug, Default)]
 pub(super) struct SessionState {
     // Store the currently detected Azure account.

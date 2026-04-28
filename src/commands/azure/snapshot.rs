@@ -4,7 +4,7 @@ use crate::azure::service::{
     list_snapshots, snapshot_kind_label,
 };
 
-// Import the shell session state so snapshot commands can check the active account.
+// Import the Azure session state so snapshot commands can check the active account.
 use super::state::{SessionState, refresh_session_state};
 
 // Build the Azure resource snapshot, save it as JSON and tell the user where it lives.

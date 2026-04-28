@@ -1,4 +1,4 @@
-// Import the Azure data model types shared by the shell and report layers.
+// Import the Azure data model types shared by commands and report layers.
 use crate::azure::model::{
     AzureAccount, AzureInventoryGroup, AzureResourceGroupReportItem, AzureResourceReportItem,
 };
@@ -44,7 +44,7 @@ struct AzureSubscriptionResourceListItem {
 // Describe one saved Azure inventory Markdown report on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InventoryReportFile {
-    // Store the plain file name so shell output can stay compact.
+    // Store the plain file name so command output can stay compact.
     pub(crate) file_name: String,
     // Store the full path so callers can still locate the file exactly.
     pub(crate) path: PathBuf,
@@ -79,7 +79,7 @@ pub(crate) enum SnapshotKind {
 pub(crate) struct SnapshotFile {
     // Store the snapshot kind so list output can show which subdirectory was used.
     pub(crate) kind: SnapshotKind,
-    // Store the plain file name so shell output can stay compact.
+    // Store the plain file name so command output can stay compact.
     pub(crate) file_name: String,
     // Store the full path so callers can still locate the file exactly.
     pub(crate) path: PathBuf,
@@ -288,7 +288,7 @@ pub(crate) fn read_inventory_report(name: &str) -> AppResult<ArtifactMatch<Strin
             Ok(ArtifactMatch::One(report_body))
         }
         ArtifactMatch::Many(reports) => {
-            // Keep the ambiguous matches so the shell can print useful choices.
+            // Keep the ambiguous matches so command handlers can print useful choices.
             let file_names = reports
                 .into_iter()
                 .map(|report| report.file_name)
@@ -324,7 +324,7 @@ pub(crate) fn delete_inventory_report(name: &str) -> AppResult<ArtifactMatch<Pat
             Ok(ArtifactMatch::One(report.path))
         }
         ArtifactMatch::Many(reports) => {
-            // Keep the ambiguous matches so the shell can print useful choices.
+            // Keep the ambiguous matches so command handlers can print useful choices.
             let file_names = reports
                 .into_iter()
                 .map(|report| report.path)
@@ -444,7 +444,7 @@ pub(crate) fn delete_snapshot(name: &str) -> AppResult<ArtifactMatch<PathBuf>> {
             Ok(ArtifactMatch::One(snapshot.path))
         }
         ArtifactMatch::Many(snapshots) => {
-            // Keep the ambiguous matches so the shell can print useful choices.
+            // Keep the ambiguous matches so command handlers can print useful choices.
             let file_names = snapshots
                 .into_iter()
                 .map(|snapshot| snapshot.path)
@@ -526,7 +526,7 @@ fn list_inventory_reports_in_single_directory(
                 directory.display()
             )
         })?;
-        // Keep the full path so metadata and shell output can refer to the same file.
+        // Keep the full path so metadata and command output can refer to the same file.
         let path = directory_entry.path();
         // Read metadata before accepting the entry so directories are ignored.
         let metadata = directory_entry.metadata().map_err(|error| {
@@ -634,7 +634,7 @@ fn list_snapshots_in_single_directory(
                 directory.display()
             )
         })?;
-        // Keep the full path so metadata and shell output can refer to the same file.
+        // Keep the full path so metadata and command output can refer to the same file.
         let path = directory_entry.path();
         // Read metadata before accepting the entry so directories are ignored.
         let metadata = directory_entry.metadata().map_err(|error| {

@@ -7,9 +7,9 @@ use crate::azure::service::{
 };
 
 // Import the parsed save option so handlers can decide whether to write a report.
-use super::commands::SaveArguments;
+use super::cli::SaveArguments;
 
-// Import the shell session state so inventory commands can check the active account.
+// Import the Azure session state so inventory commands can check the active account.
 use super::state::{SessionState, refresh_session_state};
 
 // Print Azure resources and optionally save the output as Markdown.

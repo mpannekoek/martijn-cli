@@ -1,11 +1,13 @@
 // Declare the `cli` module so this file can use the parsed command-line types.
 mod cli;
-// Declare the shared config module so shells and services can read `config.toml`.
+// Declare grouped command handlers for the non-interactive CLI.
+mod commands;
+// Declare the temporary interactive start screen shown without commands.
+mod interactive;
+// Declare the shared config module so commands and services can read `config.toml`.
 mod config;
-// Declare the `azure` module so the shell can delegate Azure-specific service logic.
+// Declare the `azure` module so commands can delegate Azure-specific service logic.
 mod azure;
-// Declare the `shells` module so `main` can route into the interactive shells.
-mod shells;
 
 // Bring the standard error trait into scope so we can erase concrete error types.
 use std::error::Error;
@@ -19,28 +21,28 @@ use crate::cli::{Cli, Commands};
 // This alias keeps return types short while still allowing different error kinds.
 pub(crate) type AppResult<T> = Result<T, Box<dyn Error>>;
 
-// Start a Tokio runtime so `main` can await async shell functions.
+// Start a Tokio runtime so `main` can await async command functions.
 #[tokio::main]
 async fn main() -> AppResult<()> {
     // Parse the raw command-line arguments into our strongly typed `Cli` struct.
     let cli = Cli::parse();
 
-    // Decide which shell to start based on the optional subcommand.
+    // Decide which command path to run based on the optional subcommand.
     match cli.command {
-        Some(Commands::Azure) => {
-            // Run the Azure shell when the user asked for Azure-specific commands.
-            shells::azure::run().await?;
+        Some(Commands::Azure { command }) => {
+            // Run the requested Azure task as a normal non-interactive command.
+            commands::azure::run_command(command).await?;
         }
-        Some(Commands::Dummy) => {
-            // Run the dummy shell when the user wants the minimal example shell.
-            shells::dummy::run().await?;
+        Some(Commands::Dummy { command }) => {
+            // Run the requested dummy task as a normal non-interactive command.
+            commands::dummy::run_command(command)?;
         }
         None => {
-            // Fall back to the root shell when no subcommand was provided.
-            shells::root::run().await?;
+            // Show only the lightweight interactive start screen when no command is provided.
+            interactive::print_start_screen();
         }
     }
 
-    // Return success after the selected shell exits cleanly.
+    // Return success after the selected path finishes cleanly.
     Ok(())
 }

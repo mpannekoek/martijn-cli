@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 // Import `BTreeMap` so resource tags can be stored as key/value pairs.
 
-// Hold the account details that the shell shows in `status`.
+// Hold the account details that the CLI shows in `azure status`.
 #[derive(Debug, Clone)]
 pub(crate) struct AzureAccount {
     // Store the friendly subscription name returned by Azure CLI.

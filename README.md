@@ -1,6 +1,6 @@
 # martijn-cli
 
-`martijn-cli` is a small Rust CLI workspace with interactive shells.
+`martijn-cli` is a small Rust CLI workspace with non-interactive commands and a tiny startup screen.
 
 This repository is both a working tool and a learning project. The code is intentionally written in a clear, step-by-step style so it stays approachable for people who are learning Rust.
 
@@ -21,63 +21,69 @@ Run the binary directly:
 cargo run
 ```
 
-Or start the Azure shell immediately:
+Running the binary without a command shows the temporary interactive start screen:
 
-```bash
-cargo run -- azure
+```text
+MARTIJN CLI
+Welcome to Martijn CLI. Ready when you are. 🚀
+Run `martijn --help` to see available commands.
 ```
 
-## Shells
+Run Azure tasks as normal CLI commands:
 
-The CLI currently has two interactive shells:
+```bash
+cargo run -- azure status
+```
 
-- `azure`: Azure login, logout, status, inventory, and snapshot commands
-- `dummy`: a minimal example shell used for learning and testing
+## Commands
 
-If you start the CLI without a subcommand, it opens the root shell. From there you can type `azure`, `dummy`, or `help`.
+The CLI currently has two command groups:
 
-## Azure Shell
+- `azure`: Azure login, logout, status, inventory, report, and snapshot commands
+- `dummy`: minimal example commands used for learning and testing
 
-Inside the Azure shell, the main commands are:
+Use `cargo run -- --help`, `cargo run -- azure --help`, or `cargo run -- dummy --help` to discover commands.
 
-- `login [tenant]`
-- `login --service-principal [--client-id <uuid>] [--client-secret <secret>] [tenant]`
-- `logout`
-- `status`
-- `inventory resources list [--save [name]]`
-- `inventory resources tree [--save [name]]`
-- `inventory groups list [--save [name]]`
-- `snapshot create resources`
-- `snapshot create groups`
-- `snapshot create all`
-- `snapshot list`
-- `snapshot delete <name>`
-- `report list`
-- `report show <name>`
-- `report delete <name>`
-- `help`
-- `exit`
+## Azure Commands
+
+The main Azure commands are:
+
+- `azure login [tenant]`
+- `azure login --service-principal [--client-id <uuid>] [--client-secret <secret>] [tenant]`
+- `azure logout`
+- `azure status`
+- `azure inventory resources list [--save [name]]`
+- `azure inventory resources tree [--save [name]]`
+- `azure inventory groups list [--save [name]]`
+- `azure snapshot create resources`
+- `azure snapshot create groups`
+- `azure snapshot create all`
+- `azure snapshot list`
+- `azure snapshot delete <name>`
+- `azure report list`
+- `azure report show <name>`
+- `azure report delete <name>`
 
 ### Inventory behavior
 
 The inventory commands print human-readable output to the terminal by default:
 
 ```text
-inventory resources list
-inventory resources tree
-inventory groups list
+azure inventory resources list
+azure inventory resources tree
+azure inventory groups list
 ```
 
 Add `--save` to also write a Markdown report with an automatic name:
 
 ```text
-inventory resources list --save
+azure inventory resources list --save
 ```
 
 Add `--save <name>` to choose a safe report name:
 
 ```text
-inventory groups list --save daily-groups
+azure inventory groups list --save daily-groups
 ```
 
 Reports are saved below:
@@ -91,19 +97,19 @@ Reports are saved below:
 Use the report commands to manage saved inventory reports:
 
 ```text
-report list
-report show daily-groups
-report delete daily-groups
+azure report list
+azure report show daily-groups
+azure report delete daily-groups
 ```
 
 ### Snapshot behavior
 
-The Azure shell can write JSON snapshots for resources, resource groups, or both:
+The Azure commands can write JSON snapshots for resources, resource groups, or both:
 
 ```text
-snapshot create resources
-snapshot create groups
-snapshot create all
+azure snapshot create resources
+azure snapshot create groups
+azure snapshot create all
 ```
 
 Snapshots are saved below:
@@ -120,30 +126,30 @@ On Windows this resolves through the user's home directory, for example:
 %USERPROFILE%\.martijn\cli\snapshot\groups\
 ```
 
-Use `snapshot list` and `snapshot delete <name>` to manage saved snapshots. Each snapshot entry contains normalized fields, a SHA-256 fingerprint of those normalized fields, and the original raw Azure JSON.
+Use `azure snapshot list` and `azure snapshot delete <name>` to manage saved snapshots. Each snapshot entry contains normalized fields, a SHA-256 fingerprint of those normalized fields, and the original raw Azure JSON.
 
 ### Login behavior
 
-The Azure shell supports two login modes through the same `login` command.
+The Azure command group supports two login modes through the same `login` command.
 
 Interactive user login:
 
 ```text
-login <tenant>
+azure login <tenant>
 ```
 
 Service-principal login:
 
 ```text
-login --service-principal --client-id <uuid> --client-secret <secret> <tenant>
+azure login --service-principal --client-id <uuid> --client-secret <secret> <tenant>
 ```
 
 Config-aware login:
 
-- `login` can use default values from `~/.martijn/cli/config.toml`
+- `azure login` can use default values from `~/.martijn/cli/config.toml`
 - explicit CLI values always override config values
-- bare `login` auto-detects service-principal mode only when a complete service-principal config is present
-- otherwise bare `login` falls back to interactive user login with the configured tenant
+- bare `azure login` auto-detects service-principal mode only when a complete service-principal config is present
+- otherwise bare `azure login` falls back to interactive user login with the configured tenant
 
 ## Config File
 
@@ -177,25 +183,25 @@ Because the client secret is stored as plain text, treat this file as sensitive.
 Interactive login with an explicit tenant:
 
 ```text
-login 00000000-0000-0000-0000-000000000000
+azure login 00000000-0000-0000-0000-000000000000
 ```
 
 Interactive login using the tenant from config:
 
 ```text
-login
+azure login
 ```
 
 Service-principal login using only config defaults:
 
 ```text
-login
+azure login
 ```
 
 Service-principal login with one CLI override:
 
 ```text
-login --service-principal --client-id 22222222-2222-2222-2222-222222222222
+azure login --service-principal --client-id 22222222-2222-2222-2222-222222222222
 ```
 
 ## Verification

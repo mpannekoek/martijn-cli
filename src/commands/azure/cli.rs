@@ -1,20 +1,19 @@
-// Import the shared shell engine so parsing stays consistent with the other shells.
-use crate::shells::engine;
-// Import Clap helpers so this shell can describe its interactive command model.
-use clap::{Args, Parser, Subcommand};
+// Import Clap helpers so this module can describe the Azure command model.
+use clap::{Args, Subcommand};
 
-// Describe the argument shape for one Azure-shell command line.
-#[derive(Parser, Debug)]
+// Describe the argument shape for one Azure command line in tests.
+#[cfg(test)]
+#[derive(clap::Parser, Debug)]
 #[command(name = "azure", disable_help_subcommand = true)]
-pub(super) struct AzureShellCli {
-    // Store the one subcommand that the user typed in the Azure shell.
+struct AzureCli {
+    // Store the Azure subcommand that Clap parsed from command-line arguments.
     #[command(subcommand)]
     command: AzureCommand,
 }
 
-// List the commands that the Azure shell understands.
+// List the Azure commands that the non-interactive CLI understands.
 #[derive(Subcommand, Debug)]
-pub(super) enum AzureCommand {
+pub(crate) enum AzureCommand {
     /// Login to Azure CLI as a user or service principal.
     Login(LoginArguments),
     /// Logout from Azure CLI and clear the cached account information.
@@ -30,16 +29,11 @@ pub(super) enum AzureCommand {
     /// List, show, and delete saved inventory reports.
     #[command(subcommand, arg_required_else_help = true)]
     Report(ReportCommand),
-    /// Show the Azure shell help message.
-    Help,
-    /// Close the current shell session.
-    #[command(alias = "quit")]
-    Exit,
 }
 
 // List the commands that belong under the Azure `inventory` command group.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
-pub(super) enum InventoryCommand {
+pub(crate) enum InventoryCommand {
     /// Work with Azure resources.
     #[command(subcommand, arg_required_else_help = true)]
     Resources(InventoryResourcesCommand),
@@ -50,7 +44,7 @@ pub(super) enum InventoryCommand {
 
 // List the commands that belong under `inventory resources`.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
-pub(super) enum InventoryResourcesCommand {
+pub(crate) enum InventoryResourcesCommand {
     /// Print Azure resources as a compact list.
     List(SaveArguments),
     /// Print Azure resources grouped as a tree.
@@ -59,14 +53,14 @@ pub(super) enum InventoryResourcesCommand {
 
 // List the commands that belong under `inventory groups`.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
-pub(super) enum InventoryGroupsCommand {
+pub(crate) enum InventoryGroupsCommand {
     /// Print Azure resource groups as a compact list.
     List(SaveArguments),
 }
 
 // List the commands that belong under the Azure `snapshot` command group.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
-pub(super) enum SnapshotCommand {
+pub(crate) enum SnapshotCommand {
     /// Create a new JSON snapshot.
     #[command(subcommand, arg_required_else_help = true)]
     Create(SnapshotCreateCommand),
@@ -78,7 +72,7 @@ pub(super) enum SnapshotCommand {
 
 // List the commands that belong under `snapshot create`.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
-pub(super) enum SnapshotCreateCommand {
+pub(crate) enum SnapshotCreateCommand {
     /// Create a resource snapshot.
     Resources,
     /// Create a resource-group snapshot.
@@ -89,7 +83,7 @@ pub(super) enum SnapshotCreateCommand {
 
 // List the commands that belong under the Azure `report` command group.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
-pub(super) enum ReportCommand {
+pub(crate) enum ReportCommand {
     /// List saved Azure inventory reports.
     List,
     /// Print one saved Azure inventory report.
@@ -100,33 +94,39 @@ pub(super) enum ReportCommand {
 
 // Hold the optional `--save` value used by inventory commands.
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
-pub(super) struct SaveArguments {
+pub(crate) struct SaveArguments {
     // Accept `--save` without a value and `--save <name>` with a custom name.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
-    pub(super) save: Option<String>,
+    pub(crate) save: Option<String>,
 }
 
 // Hold the arguments that belong to the `login` subcommand.
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
-pub(super) struct LoginArguments {
+pub(crate) struct LoginArguments {
     // Switch to service-principal authentication instead of interactive user login.
     #[arg(long = "service-principal")]
-    pub(super) service_principal: bool,
+    pub(crate) service_principal: bool,
     // Accept an optional client ID for service-principal login.
     #[arg(long = "client-id", requires = "service_principal")]
-    pub(super) client_id: Option<String>,
+    pub(crate) client_id: Option<String>,
     // Accept an optional client secret for service-principal login.
     #[arg(long = "client-secret", requires = "service_principal")]
-    pub(super) client_secret: Option<String>,
+    pub(crate) client_secret: Option<String>,
     // Accept an optional tenant for both login modes.
-    pub(super) tenant: Option<String>,
+    pub(crate) tenant: Option<String>,
 }
 
-// Convert tokenized Azure-shell input into one typed command.
+// Convert tokenized Azure input into one typed command for focused parser tests.
+#[cfg(test)]
 pub(super) fn parse_command(tokens: &[String]) -> Result<AzureCommand, clap::Error> {
-    // Reuse the shared helper so every shell performs the same Clap parsing steps.
-    let cli = engine::parse_shell_command::<AzureShellCli>(super::SHELL_NAME, tokens)?;
-    // Return only the subcommand because that is all the handler needs.
+    // Import Clap's parser trait only for this test helper.
+    use clap::Parser;
+
+    // Start with a fake binary name because Clap expects argv-style input.
+    let arguments = std::iter::once(String::from("azure")).chain(tokens.iter().cloned());
+    // Ask Clap to parse the test command line into the Azure parser struct.
+    let cli = AzureCli::try_parse_from(arguments)?;
+    // Return only the subcommand because the command runner receives that shape.
     Ok(cli.command)
 }
 
@@ -261,15 +261,6 @@ mod tests {
         assert!(rendered_help.contains("--client-secret"));
         // Confirm that the optional tenant positional argument is visible in the usage line.
         assert!(rendered_help.contains("[TENANT]"));
-    }
-
-    #[test]
-    fn parses_help_as_a_real_command() {
-        // Parse the explicit help command that users can type inside the shell.
-        let parsed_command = parse_command(&[String::from("help")]).expect("command should parse");
-
-        // Confirm that help is represented as its own typed variant.
-        assert!(matches!(parsed_command, AzureCommand::Help));
     }
 
     #[test]

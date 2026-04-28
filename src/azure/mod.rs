@@ -1,4 +1,4 @@
-// Expose the Azure data model types so the shell and services can share them.
+// Expose the Azure data model types so commands and services can share them.
 pub(crate) mod model;
 // Expose the Markdown report helpers for Azure inventory exports.
 pub(crate) mod report;

@@ -5,8 +5,8 @@ use crate::config::load_app_config;
 // Import `Uuid` so we can try parse the tenant identifier as a UUID for better error messages.
 use uuid::Uuid;
 
-// Import typed login arguments parsed by the command module.
-use super::commands::LoginArguments;
+// Import typed login arguments parsed by the CLI shape module.
+use super::cli::LoginArguments;
 // Import state helpers so login commands can refresh visible account status.
 use super::state::{SessionState, refresh_and_print_status};
 
@@ -26,7 +26,7 @@ enum ResolvedLogin {
         client_id: String,
         // Keep the client secret as an owned string because the command outlives the config borrow.
         client_secret: String,
-        // Track whether the shell auto-selected this mode from config so we can explain it clearly.
+        // Track whether the CLI auto-selected this mode from config so we can explain it clearly.
         auto_detected: bool,
     },
 }
@@ -77,7 +77,7 @@ pub(super) async fn handle_login(state: &mut SessionState, arguments: &LoginArgu
         }
     }
 
-    // Refresh and print the cached status so the shell reflects the newest state.
+    // Refresh and print the cached status so the CLI reflects the newest state.
     refresh_and_print_status(state).await;
 }
 
@@ -99,7 +99,7 @@ pub(super) async fn handle_logout(state: &mut SessionState) {
         }
     }
 
-    // Refresh and print the cached status so the shell reflects the newest state.
+    // Refresh and print the cached status so the CLI reflects the newest state.
     refresh_and_print_status(state).await;
 }
 
@@ -319,7 +319,7 @@ mod tests {
     use crate::config::{AppConfig, AzureConfig, AzureServicePrincipalConfig};
 
     // Import the login argument type so tests can build parsed command inputs.
-    use super::super::commands::LoginArguments;
+    use super::super::cli::LoginArguments;
     // Import the resolver helpers so the tests can validate login behavior.
     use super::{ResolvedLogin, resolve_login};
 
@@ -383,7 +383,7 @@ mod tests {
         // Resolve the final login request from the CLI arguments and config.
         let resolved_login = resolve_login(&arguments, &config).expect("login should resolve");
 
-        // Confirm that the shell falls back to normal interactive login with the shared tenant.
+        // Confirm that the CLI falls back to normal interactive login with the shared tenant.
         assert!(matches!(
             resolved_login,
             ResolvedLogin::InteractiveUser { tenant }
