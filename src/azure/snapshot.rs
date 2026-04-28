@@ -425,8 +425,8 @@ pub(crate) fn build_group_snapshot_output_directory_from_home(home_directory: &P
     build_snapshot_output_directory_from_home(home_directory).join("groups")
 }
 
-// Build a unique snapshot filename for one snapshot kind.
-pub(crate) fn build_named_snapshot_file_name(snapshot_kind: &str) -> String {
+// Build a unique snapshot filename.
+pub(crate) fn build_snapshot_file_name() -> String {
     // Capture the current UTC time for the timestamp part of the filename.
     let now = OffsetDateTime::now_utc();
     // Describe the compact timestamp format used in the filename.
@@ -440,16 +440,16 @@ pub(crate) fn build_named_snapshot_file_name(snapshot_kind: &str) -> String {
     // Keep only the first eight characters so the filename stays compact.
     let short_unique_id = &unique_id[..8];
 
-    // Return the final filename with the kind in the prefix and `.json` extension.
-    format!("azure-snapshot-{snapshot_kind}-{timestamp}-{short_unique_id}.json")
+    // Return the final filename without a type prefix because the parent folder already stores the type.
+    format!("{timestamp}-{short_unique_id}.json")
 }
 
 #[cfg(test)]
 mod tests {
     // Import the snapshot helpers that these tests verify.
     use super::{
-        build_group_snapshot_output_directory_from_home, build_named_snapshot_file_name,
-        build_resource_snapshot_output_directory_from_home,
+        build_group_snapshot_output_directory_from_home,
+        build_resource_snapshot_output_directory_from_home, build_snapshot_file_name,
         build_snapshot_output_directory_from_home, fingerprint_normalized_resource,
         normalize_snapshot_resource,
     };
@@ -562,12 +562,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_file_name_uses_expected_kind_prefix_and_extension() {
+    fn snapshot_file_name_omits_snapshot_type_prefix_and_uses_json_extension() {
         // Build one generated filename.
-        let file_name = build_named_snapshot_file_name("resources");
+        let file_name = build_snapshot_file_name();
 
-        // Confirm that the filename uses the expected prefix.
-        assert!(file_name.starts_with("azure-snapshot-resources-"));
+        // Confirm that the filename no longer repeats the snapshot type.
+        assert!(!file_name.starts_with("azure-snapshot-"));
         // Confirm that the filename ends with the JSON extension.
         assert!(file_name.ends_with(".json"));
     }

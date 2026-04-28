@@ -22,14 +22,10 @@ use crate::AppResult;
 const MAIN_MENU_ITEMS: [&str; 2] = ["Azure", "Dummy"];
 
 // Store the Azure command examples shown in the Azure submenu.
-const AZURE_COMMAND_HINTS: [&str; 1] = [
-    "Help",
-];
+const AZURE_COMMAND_HINTS: [&str; 1] = ["Help"];
 
 // Store the dummy command examples shown in the dummy submenu.
-const DUMMY_COMMAND_HINTS: [&str; 1] = [
-    "Help",
-];
+const DUMMY_COMMAND_HINTS: [&str; 1] = ["Help"];
 
 // Describe which screen is currently visible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

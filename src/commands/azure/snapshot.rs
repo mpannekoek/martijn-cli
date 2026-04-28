@@ -122,15 +122,25 @@ pub(super) fn handle_snapshot_list() {
         return;
     }
 
-    // Print every snapshot path in the newest-first order returned by the service layer.
+    // Find the longest type label so every file name can start in the same column.
+    let type_column_width = snapshots
+        // Borrow the snapshot list so we can inspect it without taking ownership yet.
+        .iter()
+        // Convert every snapshot kind into the label that will be printed.
+        .map(|snapshot| snapshot_kind_label(snapshot.kind).len())
+        // Keep the largest label length, if the list contains any snapshots.
+        .max()
+        // Fall back to zero even though the empty-list case already returned above.
+        .unwrap_or(0);
+
+    // Print every snapshot name in the newest-first order returned by the service layer.
     for snapshot in snapshots {
-        // Display kind, size and path so users can identify the snapshot quickly.
+        // Convert the enum value into the same user-facing label used for the width calculation.
+        let snapshot_type = snapshot_kind_label(snapshot.kind);
+        // Print the type first so users can see which snapshot directory the file belongs to.
         println!(
-            "{}  {}  {} bytes  {}",
-            snapshot_kind_label(snapshot.kind),
-            snapshot.file_name,
-            snapshot.size_bytes,
-            snapshot.path.display()
+            "{snapshot_type:<type_column_width$}   {}",
+            snapshot.file_name
         );
     }
 }

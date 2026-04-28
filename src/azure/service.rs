@@ -1,14 +1,13 @@
 // Import the Azure data model types shared by commands and report layers.
 use crate::azure::model::{
-    AzureAccount, AzureInventoryGroup, AzureResourceGroupReportItem, AzureResourceReportItem,
+    AzureAccount, AzureGroupSnapshotEnvelope, AzureResourceGroupReportItem, AzureSnapshotEnvelope,
+    AzureSnapshotNormalizedResource,
 };
 // Import the Azure report helpers used to sort, render and locate output files.
-use crate::azure::report::{
-    resolve_inventory_output_directory, sort_resource_groups, sort_resources,
-};
+use crate::azure::report::{resolve_inventory_output_directory, sort_resource_groups};
 // Import the Azure snapshot helpers used to normalize, render and locate JSON snapshots.
 use crate::azure::snapshot::{
-    build_group_snapshot_envelope, build_named_snapshot_file_name, build_snapshot_envelope,
+    build_group_snapshot_envelope, build_snapshot_envelope, build_snapshot_file_name,
     resolve_group_snapshot_output_directory, resolve_resource_snapshot_output_directory,
     resolve_snapshot_output_directory,
 };
@@ -16,6 +15,8 @@ use crate::azure::snapshot::{
 use crate::AppResult;
 // Import filesystem helpers so we can create directories and write files.
 use std::fs;
+// Import `BTreeMap` so snapshot resources can be grouped into stable tree output.
+use std::collections::BTreeMap;
 // Import `Path` and `PathBuf` because this service reads and writes report files.
 use std::path::{Path, PathBuf};
 // Import `Stdio` so we can control how spawned processes use standard streams.
@@ -77,7 +78,7 @@ pub(crate) enum SnapshotKind {
 // Describe one saved Azure snapshot JSON file on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SnapshotFile {
-    // Store the snapshot kind so list output can show which subdirectory was used.
+    // Store the snapshot kind so command output can show whether this is a resource or group snapshot.
     pub(crate) kind: SnapshotKind,
     // Store the plain file name so command output can stay compact.
     pub(crate) file_name: String,
@@ -85,8 +86,6 @@ pub(crate) struct SnapshotFile {
     pub(crate) path: PathBuf,
     // Store the optional modified time because some filesystems may not provide it.
     pub(crate) modified_at: Option<SystemTime>,
-    // Store the file size in bytes so users can quickly compare snapshots.
-    pub(crate) size_bytes: u64,
 }
 
 // Describe the result of trying to resolve a user-supplied artifact name.
@@ -184,30 +183,36 @@ pub(crate) async fn run_az_service_principal_login(
     Ok(status.success())
 }
 
-// Build a terminal-friendly resources list from the active subscription.
-pub(crate) async fn render_inventory_resources_list() -> AppResult<String> {
-    // Ask Azure CLI for all resources in one subscription-wide call.
-    let mut resources = fetch_subscription_resources().await?;
+// Build a terminal-friendly resources list from a saved resources snapshot.
+pub(crate) fn render_inventory_resources_list(snapshot_name: Option<&str>) -> AppResult<String> {
+    // Read the selected resource snapshot from local disk.
+    let snapshot = read_resource_snapshot(snapshot_name)?;
+    // Convert snapshot entries into the smaller shape used by the list renderer.
+    let mut resources = resource_list_items_from_snapshot(snapshot);
     // Sort the resources so repeated runs stay easy to compare.
     sort_subscription_resources(&mut resources);
     // Render the sorted resources as readable terminal text.
     Ok(render_resources_list_text(&resources))
 }
 
-// Build a terminal-friendly resources tree from the active subscription.
-pub(crate) async fn render_inventory_resources_tree() -> AppResult<String> {
-    // Ask Azure CLI for all resource groups that belong to the active subscription.
-    let resource_groups = fetch_resource_groups().await?;
-    // Build the grouped inventory by fetching resources for each resource group.
-    let inventory_groups = build_inventory_groups(resource_groups).await?;
-    // Render the grouped data as simple ASCII tree output.
-    Ok(render_resources_tree_text(&inventory_groups))
+// Build a compact Markdown code block tree from a saved resources snapshot.
+pub(crate) fn render_inventory_resources_tree(snapshot_name: Option<&str>) -> AppResult<String> {
+    // Read only the resource snapshot because the tree intentionally ignores group snapshots.
+    let snapshot = read_resource_snapshot(snapshot_name)?;
+    // Convert resources into group-name buckets for the hierarchical view.
+    let grouped_resources = resource_tree_items_from_snapshot(snapshot);
+    // Render the grouped names as a fenced Markdown code block.
+    Ok(render_resources_tree_markdown(&grouped_resources))
 }
 
-// Build a terminal-friendly resource-group list from the active subscription.
-pub(crate) async fn render_inventory_groups_list() -> AppResult<String> {
-    // Ask Azure CLI for all resource groups that belong to the active subscription.
-    let resource_groups = fetch_resource_groups().await?;
+// Build a terminal-friendly resource-group list from a saved groups snapshot.
+pub(crate) fn render_inventory_groups_list(snapshot_name: Option<&str>) -> AppResult<String> {
+    // Read the selected group snapshot from local disk.
+    let snapshot = read_group_snapshot(snapshot_name)?;
+    // Convert snapshot entries into the smaller shape used by the group renderer.
+    let mut resource_groups = group_list_items_from_snapshot(snapshot);
+    // Sort the groups so repeated runs stay easy to compare.
+    sort_resource_groups(&mut resource_groups);
     // Render the sorted groups as readable terminal text.
     Ok(render_groups_list_text(&resource_groups))
 }
@@ -361,7 +366,7 @@ pub(crate) async fn generate_resource_snapshot(account: &AzureAccount) -> AppRes
     })?;
 
     // Generate a unique filename so every run creates a new JSON document.
-    let file_name = build_named_snapshot_file_name("resources");
+    let file_name = build_snapshot_file_name();
     // Join the directory and filename into the final full path.
     let output_file_path = output_directory.join(file_name);
 
@@ -398,7 +403,7 @@ pub(crate) async fn generate_group_snapshot(account: &AzureAccount) -> AppResult
     })?;
 
     // Generate a unique filename so every run creates a new JSON document.
-    let file_name = build_named_snapshot_file_name("groups");
+    let file_name = build_snapshot_file_name();
     // Join the directory and filename into the final full path.
     let output_file_path = output_directory.join(file_name);
 
@@ -458,6 +463,191 @@ pub(crate) fn delete_snapshot(name: &str) -> AppResult<ArtifactMatch<PathBuf>> {
             Ok(ArtifactMatch::None)
         }
     }
+}
+
+// Read a resource snapshot selected by name or by newest matching file.
+fn read_resource_snapshot(snapshot_name: Option<&str>) -> AppResult<AzureSnapshotEnvelope> {
+    // Resolve the concrete snapshot file before reading JSON from disk.
+    let snapshot_file = select_snapshot_file(SnapshotKind::Resources, snapshot_name)?;
+    // Read the whole JSON document as text so serde can parse it safely.
+    let snapshot_json = fs::read_to_string(&snapshot_file.path).map_err(|error| {
+        format!(
+            "unable to read the resource snapshot `{}`: {error}",
+            snapshot_file.path.display()
+        )
+    })?;
+    // Deserialize the snapshot into the typed envelope used by snapshot generation.
+    serde_json::from_str(&snapshot_json).map_err(|error| {
+        format!(
+            "unable to parse the resource snapshot `{}`: {error}",
+            snapshot_file.path.display()
+        )
+        .into()
+    })
+}
+
+// Read a resource-group snapshot selected by name or by newest matching file.
+fn read_group_snapshot(snapshot_name: Option<&str>) -> AppResult<AzureGroupSnapshotEnvelope> {
+    // Resolve the concrete snapshot file before reading JSON from disk.
+    let snapshot_file = select_snapshot_file(SnapshotKind::Groups, snapshot_name)?;
+    // Read the whole JSON document as text so serde can parse it safely.
+    let snapshot_json = fs::read_to_string(&snapshot_file.path).map_err(|error| {
+        format!(
+            "unable to read the group snapshot `{}`: {error}",
+            snapshot_file.path.display()
+        )
+    })?;
+    // Deserialize the snapshot into the typed envelope used by snapshot generation.
+    serde_json::from_str(&snapshot_json).map_err(|error| {
+        format!(
+            "unable to parse the group snapshot `{}`: {error}",
+            snapshot_file.path.display()
+        )
+        .into()
+    })
+}
+
+// Select one saved snapshot file by explicit name or newest file for the requested type.
+fn select_snapshot_file(
+    snapshot_kind: SnapshotKind,
+    snapshot_name: Option<&str>,
+) -> AppResult<SnapshotFile> {
+    // Resolve the base snapshot directory used by normal CLI commands.
+    let snapshot_directory = resolve_snapshot_output_directory()?;
+    // Delegate to the directory-based helper so tests can use isolated temporary folders.
+    select_snapshot_file_in_directory(snapshot_kind, snapshot_name, &snapshot_directory)
+}
+
+// Select one saved snapshot file from a concrete base directory.
+fn select_snapshot_file_in_directory(
+    snapshot_kind: SnapshotKind,
+    snapshot_name: Option<&str>,
+    directory: &Path,
+) -> AppResult<SnapshotFile> {
+    // List all snapshots through the same path and sorting logic used by `snapshot list`.
+    let snapshots = list_snapshots_in_directory(directory)?;
+    // Keep only snapshots of the type required by the current inventory command.
+    let matching_kind_snapshots = snapshots
+        .into_iter()
+        .filter(|snapshot| snapshot.kind == snapshot_kind)
+        .collect::<Vec<SnapshotFile>>();
+
+    // Use explicit name matching when the user provided `--snapshot`.
+    if let Some(requested_name) = snapshot_name.and_then(non_empty_text) {
+        // Reuse the same exact-name, stem and extension matching as snapshot deletion.
+        return match match_snapshot_name(requested_name, matching_kind_snapshots) {
+            ArtifactMatch::One(snapshot) => Ok(snapshot),
+            ArtifactMatch::Many(snapshots) => {
+                // Join names into one readable line because this is returned as an error string.
+                let file_names = snapshots
+                    .into_iter()
+                    .map(|snapshot| snapshot.file_name)
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                // Stop instead of choosing an arbitrary ambiguous snapshot.
+                Err(format!(
+                    "multiple {} snapshots match `{requested_name}`: {file_names}",
+                    snapshot_kind_label(snapshot_kind)
+                )
+                .into())
+            }
+            ArtifactMatch::None => Err(format!(
+                "no {} snapshot found for `{requested_name}`. Run `martijn azure snapshot create {}` first.",
+                snapshot_kind_label(snapshot_kind),
+                snapshot_kind_label(snapshot_kind)
+            )
+            .into()),
+        };
+    }
+
+    // Use the newest matching snapshot because `list_snapshots` already sorted newest first.
+    matching_kind_snapshots.into_iter().next().ok_or_else(|| {
+        format!(
+            "no {} snapshots found. Run `martijn azure snapshot create {}` first.",
+            snapshot_kind_label(snapshot_kind),
+            snapshot_kind_label(snapshot_kind)
+        )
+        .into()
+    })
+}
+
+// Convert a resource snapshot into rows for `inventory resources list`.
+fn resource_list_items_from_snapshot(
+    snapshot: AzureSnapshotEnvelope,
+) -> Vec<AzureSubscriptionResourceListItem> {
+    // Store every converted resource in a vector sized to the snapshot entry count.
+    let mut resources: Vec<AzureSubscriptionResourceListItem> =
+        Vec::with_capacity(snapshot.resources.len());
+
+    // Move each snapshot resource out of the envelope so no unnecessary clones are needed.
+    for snapshot_resource in snapshot.resources {
+        // Move the normalized resource into a shorter local name for readable field access.
+        let normalized = snapshot_resource.normalized;
+        // Keep only the fields that the list renderer prints.
+        resources.push(AzureSubscriptionResourceListItem {
+            name: normalized.name,
+            resource_type: normalized.resource_type,
+            resource_group: normalized.resource_group,
+            location: normalized.location,
+        });
+    }
+
+    // Return the converted list rows.
+    resources
+}
+
+// Convert a group snapshot into rows for `inventory groups list`.
+fn group_list_items_from_snapshot(
+    snapshot: AzureGroupSnapshotEnvelope,
+) -> Vec<AzureResourceGroupReportItem> {
+    // Store every converted group in a vector sized to the snapshot entry count.
+    let mut groups: Vec<AzureResourceGroupReportItem> = Vec::with_capacity(snapshot.groups.len());
+
+    // Move each snapshot group out of the envelope so no unnecessary clones are needed.
+    for snapshot_group in snapshot.groups {
+        // Move the normalized group into a shorter local name for readable field access.
+        let normalized = snapshot_group.normalized;
+        // Keep only the fields that the group list renderer prints.
+        groups.push(AzureResourceGroupReportItem {
+            name: normalized.name,
+            location: normalized.location,
+        });
+    }
+
+    // Return the converted group rows.
+    groups
+}
+
+// Group resource names from one resource snapshot by resource group name.
+fn resource_tree_items_from_snapshot(
+    snapshot: AzureSnapshotEnvelope,
+) -> BTreeMap<String, Vec<String>> {
+    // Use a BTreeMap so group names render in deterministic alphabetical order.
+    let mut grouped_resources: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    // Walk through every resource from the snapshot.
+    for snapshot_resource in snapshot.resources {
+        // Move the normalized resource into a shorter local name for readable field access.
+        let normalized: AzureSnapshotNormalizedResource = snapshot_resource.normalized;
+        // Normalize an empty resource group to a dash so the tree stays visible.
+        let resource_group = display_value(&normalized.resource_group);
+        // Normalize an empty resource name to a dash for the same reason.
+        let resource_name = display_value(&normalized.name);
+        // Insert the resource name below its group, creating the group bucket when needed.
+        grouped_resources
+            .entry(resource_group)
+            .or_default()
+            .push(resource_name);
+    }
+
+    // Sort resource names inside each group so the tree is stable and easy to scan.
+    for resource_names in grouped_resources.values_mut() {
+        // Compare lowercase forms so display order does not depend on Azure casing.
+        resource_names.sort_by_key(|resource_name| resource_name.to_lowercase());
+    }
+
+    // Return the grouped tree data.
+    grouped_resources
 }
 
 // List saved Azure inventory reports from one concrete base directory.
@@ -659,13 +849,12 @@ fn list_snapshots_in_single_directory(
             continue;
         }
 
-        // Add the accepted snapshot with the metadata needed for table output.
+        // Add the accepted snapshot with the metadata needed for sorting and deletion.
         snapshots.push(SnapshotFile {
             kind: snapshot_kind,
             file_name,
             path,
             modified_at: metadata.modified().ok(),
-            size_bytes: metadata.len(),
         });
     }
 
@@ -708,7 +897,7 @@ fn snapshot_kind_directory_name(snapshot_kind: SnapshotKind) -> &'static str {
 
 // Return the user-facing label for one snapshot kind.
 pub(crate) fn snapshot_kind_label(snapshot_kind: SnapshotKind) -> &'static str {
-    // Match every snapshot kind to a compact terminal label.
+    // Match every snapshot kind to the same word that users see in the snapshot folder names.
     match snapshot_kind {
         SnapshotKind::Resources => "resources",
         SnapshotKind::Groups => "groups",
@@ -932,46 +1121,41 @@ fn render_resources_list_text(resources: &[AzureSubscriptionResourceListItem]) -
     output
 }
 
-// Render resources grouped under resource groups as simple ASCII tree output.
-pub(crate) fn render_resources_tree_text(inventory_groups: &[AzureInventoryGroup]) -> String {
-    // Start with a clear heading so pasted output remains understandable.
-    let mut output = String::from("Azure resource tree\n");
+// Render a compact resource tree as a Markdown fenced code block.
+pub(crate) fn render_resources_tree_markdown(
+    grouped_resources: &BTreeMap<String, Vec<String>>,
+) -> String {
+    // Start a plain text code block because the tree is meant to be pasted into Markdown.
+    let mut output = String::from("```text\n");
 
-    // Handle empty subscriptions with an explicit line.
-    if inventory_groups.is_empty() {
+    // Handle an empty resource snapshot with one clear placeholder line.
+    if grouped_resources.is_empty() {
         output.push_str("-\n");
+        output.push_str("```\n");
         return output;
     }
 
-    // Render every group as one parent node.
-    for inventory_group in inventory_groups {
-        // Normalize the group location before rendering.
-        let group_location = display_value(&inventory_group.resource_group.location);
-        // Append the resource group line.
-        output.push_str(&format!(
-            "{} ({})\n",
-            display_value(&inventory_group.resource_group.name),
-            group_location
-        ));
+    // Render each resource group as a parent line.
+    for (resource_group_name, resource_names) in grouped_resources {
+        // Print only the group name because this view is intentionally short.
+        output.push_str(resource_group_name);
+        // End the group line before rendering child resources.
+        output.push('\n');
 
-        // Render an explicit placeholder for empty groups.
-        if inventory_group.resources.is_empty() {
-            output.push_str("  - -\n");
-            continue;
-        }
-
-        // Render every resource below the group.
-        for resource in &inventory_group.resources {
-            // Append the resource child line with the resource type for quick scanning.
-            output.push_str(&format!(
-                "  - {} [{}]\n",
-                display_value(&resource.name),
-                display_value(&resource.resource_type)
-            ));
+        // Render every resource name directly below its group.
+        for resource_name in resource_names {
+            // Use two spaces to make the hierarchy visible without extra symbols.
+            output.push_str("  ");
+            // Print only the resource name because types and locations are intentionally omitted.
+            output.push_str(resource_name);
+            // End the resource line.
+            output.push('\n');
         }
     }
 
-    // Return the complete terminal output.
+    // Close the Markdown fenced code block.
+    output.push_str("```\n");
+    // Return the compact tree.
     output
 }
 
@@ -1023,6 +1207,21 @@ pub(crate) fn render_saved_inventory_markdown(title: &str, body: &str) -> String
     markdown
 }
 
+// Wrap an already-fenced Markdown tree in a small Markdown report.
+pub(crate) fn render_saved_inventory_tree_markdown(title: &str, body: &str) -> String {
+    // Start with a Markdown heading for the saved tree report.
+    let mut markdown = format!("# {title}\n\n");
+    // Include the already-fenced tree exactly once so the report avoids nested code blocks.
+    markdown.push_str(body);
+    // Ensure the file ends with a newline for tidy Markdown output.
+    if !markdown.ends_with('\n') {
+        markdown.push('\n');
+    }
+
+    // Return the complete Markdown report.
+    markdown
+}
+
 // Normalize one display value to a dash when Azure returned empty text.
 fn display_value(value: &str) -> String {
     // Remove surrounding whitespace before checking whether the value is meaningful.
@@ -1035,36 +1234,6 @@ fn display_value(value: &str) -> String {
 
     // Return the visible value unchanged otherwise.
     trimmed.to_owned()
-}
-
-// Ask Azure CLI for all resource groups in the current subscription.
-async fn fetch_resource_groups() -> AppResult<Vec<AzureResourceGroupReportItem>> {
-    // Capture JSON output because structured data is easier to parse safely than table text.
-    let raw_json = run_az_json_command(&["group", "list"]).await?;
-    // Parse the JSON text into typed Rust values.
-    let mut resource_groups: Vec<AzureResourceGroupReportItem> = serde_json::from_str(&raw_json)
-        .map_err(|error| format!("Azure CLI returned invalid resource group JSON: {error}"))?;
-
-    // Sort the groups so the Markdown output stays predictable and easy to scan.
-    sort_resource_groups(&mut resource_groups);
-
-    // Return the ready-to-use list.
-    Ok(resource_groups)
-}
-
-// Ask Azure CLI for all resources in the current subscription.
-async fn fetch_subscription_resources() -> AppResult<Vec<AzureSubscriptionResourceListItem>> {
-    // Capture JSON output because structured data is easier to parse safely than table text.
-    let raw_json = run_az_json_command(&["resource", "list"]).await?;
-    // Parse the JSON text into typed Rust values.
-    let mut resources: Vec<AzureSubscriptionResourceListItem> = serde_json::from_str(&raw_json)
-        .map_err(|error| format!("Azure CLI returned invalid resource JSON: {error}"))?;
-
-    // Sort the resources so the terminal output stays predictable and easy to scan.
-    sort_subscription_resources(&mut resources);
-
-    // Return the ready-to-use list.
-    Ok(resources)
 }
 
 // Sort subscription resources by type, group and name case-insensitively.
@@ -1081,24 +1250,6 @@ fn sort_subscription_resources(resources: &mut [AzureSubscriptionResourceListIte
             })
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
-}
-
-// Ask Azure CLI for all resources inside one specific resource group.
-async fn fetch_resources_for_group(
-    resource_group_name: &str,
-) -> AppResult<Vec<AzureResourceReportItem>> {
-    // Pass the group name explicitly so Azure returns only the matching resources.
-    let raw_json =
-        run_az_json_command(&["resource", "list", "--resource-group", resource_group_name]).await?;
-    // Parse the JSON text into typed Rust values.
-    let mut resources: Vec<AzureResourceReportItem> = serde_json::from_str(&raw_json)
-        .map_err(|error| format!("Azure CLI returned invalid resource JSON: {error}"))?;
-
-    // Sort the resources so each group section stays stable and readable.
-    sort_resources(&mut resources);
-
-    // Return the ready-to-use list.
-    Ok(resources)
 }
 
 // Ask Azure CLI for all resources in the active subscription as raw JSON values.
@@ -1123,28 +1274,6 @@ async fn fetch_raw_resource_groups() -> AppResult<Vec<serde_json::Value>> {
 
     // Return the raw groups exactly as parsed from Azure CLI output.
     Ok(raw_groups)
-}
-
-// Build the full inventory by pairing every resource group with its resources.
-async fn build_inventory_groups(
-    resource_groups: Vec<AzureResourceGroupReportItem>,
-) -> AppResult<Vec<AzureInventoryGroup>> {
-    // Allocate the output vector up front because we know the final group count already.
-    let mut inventory_groups: Vec<AzureInventoryGroup> = Vec::with_capacity(resource_groups.len());
-
-    // Walk through each resource group one by one so errors stay easy to attribute.
-    for resource_group in resource_groups {
-        // Fetch all resources that belong to the current group.
-        let resources = fetch_resources_for_group(&resource_group.name).await?;
-        // Store the combined group section for later Markdown rendering.
-        inventory_groups.push(AzureInventoryGroup {
-            resource_group,
-            resources,
-        });
-    }
-
-    // Return the full grouped inventory.
-    Ok(inventory_groups)
 }
 
 // Run one Azure CLI command and capture successful JSON output as text.
@@ -1284,15 +1413,22 @@ fn parse_account_from_tsv(raw_output: &str) -> Option<AzureAccount> {
 mod tests {
     // Import the helpers under test from the parent module.
     use super::{
-        AzureSubscriptionResourceListItem, InventoryReportKind, build_inventory_report_file_name,
-        build_service_principal_login_arguments, decode_azure_cli_json_output,
+        AzureSubscriptionResourceListItem, InventoryReportKind, SnapshotKind,
+        build_inventory_report_file_name, build_service_principal_login_arguments,
+        decode_azure_cli_json_output, group_list_items_from_snapshot,
         list_inventory_reports_in_directory, parse_account_from_tsv, render_groups_list_text,
-        render_resources_list_text, render_resources_tree_text, slugify_file_stem,
+        render_resources_list_text, render_resources_tree_markdown,
+        render_saved_inventory_tree_markdown, resource_list_items_from_snapshot,
+        resource_tree_items_from_snapshot, select_snapshot_file_in_directory, slugify_file_stem,
     };
     // Import model types so rendering tests can build representative Azure data.
     use crate::azure::model::{
-        AzureInventoryGroup, AzureResourceGroupReportItem, AzureResourceReportItem,
+        AzureGroupSnapshotEnvelope, AzureResourceGroupReportItem, AzureSnapshotEnvelope,
+        AzureSnapshotGroup, AzureSnapshotNormalizedGroup, AzureSnapshotNormalizedResource,
+        AzureSnapshotResource, AzureSnapshotSubscription,
     };
+    // Import `Value` so tests can fill flexible snapshot fields without custom structs.
+    use serde_json::Value;
     // Import filesystem helpers so tests can create isolated report directories.
     use std::fs;
     // Import environment helpers so tests can write below the system temporary directory.
@@ -1430,6 +1566,100 @@ mod tests {
     }
 
     #[test]
+    fn newest_snapshot_selection_filters_by_requested_type() {
+        // Build an isolated temporary snapshot directory for this filesystem test.
+        let directory = env::temp_dir().join(format!(
+            "martijn-cli-snapshot-select-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        // Create the resource snapshot directory.
+        let resource_directory = directory.join("resources");
+        // Create the group snapshot directory.
+        let group_directory = directory.join("groups");
+        // Create both directories before writing files.
+        fs::create_dir_all(&resource_directory).expect("resource directory should be created");
+        fs::create_dir_all(&group_directory).expect("group directory should be created");
+
+        // Write an older resource snapshot.
+        fs::write(
+            resource_directory.join("20260423-080000-11111111.json"),
+            "{}",
+        )
+        .expect("older resource snapshot should be written");
+        // Sleep briefly so filesystems with coarse timestamps can still observe ordering.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        // Write a newer resource snapshot.
+        fs::write(
+            resource_directory.join("20260424-080000-22222222.json"),
+            "{}",
+        )
+        .expect("newer resource snapshot should be written");
+        // Write a group snapshot that must not be selected for resource inventory.
+        fs::write(group_directory.join("20260425-080000-33333333.json"), "{}")
+            .expect("group snapshot should be written");
+
+        // Select the newest resource snapshot without providing an explicit name.
+        let selected_snapshot =
+            select_snapshot_file_in_directory(SnapshotKind::Resources, None, &directory)
+                .expect("resource snapshot should be selected");
+
+        // Confirm that selection stayed within the resources directory.
+        assert_eq!(selected_snapshot.file_name, "20260424-080000-22222222.json");
+
+        // Clean up the temporary directory after the assertions complete.
+        fs::remove_dir_all(&directory).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    fn named_snapshot_selection_accepts_file_stems() {
+        // Build an isolated temporary snapshot directory for this filesystem test.
+        let directory = env::temp_dir().join(format!(
+            "martijn-cli-snapshot-name-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        // Create the group snapshot directory before writing files.
+        let group_directory = directory.join("groups");
+        // Create the directory before writing a group snapshot.
+        fs::create_dir_all(&group_directory).expect("group directory should be created");
+        // Write one group snapshot that can be selected by stem.
+        fs::write(group_directory.join("daily-groups.json"), "{}")
+            .expect("group snapshot should be written");
+
+        // Select the snapshot by stem instead of full file name.
+        let selected_snapshot = select_snapshot_file_in_directory(
+            SnapshotKind::Groups,
+            Some("daily-groups"),
+            &directory,
+        )
+        .expect("named group snapshot should be selected");
+
+        // Confirm that stem matching resolved the JSON file.
+        assert_eq!(selected_snapshot.file_name, "daily-groups.json");
+
+        // Clean up the temporary directory after the assertions complete.
+        fs::remove_dir_all(&directory).expect("temporary directory should be removed");
+    }
+
+    #[test]
+    fn missing_snapshot_selection_returns_actionable_error() {
+        // Build a path that should not exist because it includes a fresh UUID.
+        let missing_directory = env::temp_dir().join(format!(
+            "martijn-cli-missing-snapshot-test-{}",
+            Uuid::new_v4().simple()
+        ));
+
+        // Try to select a resource snapshot from the missing directory.
+        let error =
+            select_snapshot_file_in_directory(SnapshotKind::Resources, None, &missing_directory)
+                .expect_err("missing resource snapshot should be an error");
+        // Convert the application error into text so the message can be inspected.
+        let message = error.to_string();
+
+        // Confirm that the message tells the user which snapshot command to run.
+        assert!(message.contains("snapshot create resources"));
+    }
+
+    #[test]
     fn slugify_file_stem_normalizes_custom_names() {
         // Normalize a name with spaces and punctuation.
         let slug = slugify_file_stem(" Daily Report! ");
@@ -1466,30 +1696,65 @@ mod tests {
     }
 
     #[test]
-    fn render_resources_tree_text_groups_resources_under_groups() {
-        // Build one grouped inventory entry.
-        let inventory_groups = vec![AzureInventoryGroup {
-            resource_group: AzureResourceGroupReportItem {
-                name: String::from("rg-app"),
-                location: String::from("westeurope"),
-            },
-            resources: vec![AzureResourceReportItem {
-                name: String::from("app-api"),
-                resource_type: String::from("Microsoft.Web/sites"),
-                location: String::from("westeurope"),
-                kind: None,
-                tags: None,
-                sku: None,
-            }],
-        }];
+    fn resource_snapshot_converts_to_resource_list_rows() {
+        // Build a small resource snapshot envelope for conversion.
+        let snapshot = sample_resource_snapshot();
 
-        // Render the grouped resources into terminal text.
-        let output = render_resources_tree_text(&inventory_groups);
+        // Convert the snapshot into list-renderer rows.
+        let resources = resource_list_items_from_snapshot(snapshot);
+        // Render the resources into terminal text.
+        let output = render_resources_list_text(&resources);
 
-        // Confirm that the group appears as a parent row.
-        assert!(output.contains("rg-app (westeurope)"));
-        // Confirm that the resource appears as a child row.
-        assert!(output.contains("  - app-api [Microsoft.Web/sites]"));
+        // Confirm that the converted resource row appears in list output.
+        assert!(output.contains("app-api | Microsoft.Web/sites | rg-app | westeurope"));
+    }
+
+    #[test]
+    fn group_snapshot_converts_to_group_list_rows() {
+        // Build a small group snapshot envelope for conversion.
+        let snapshot = sample_group_snapshot();
+
+        // Convert the snapshot into group-renderer rows.
+        let groups = group_list_items_from_snapshot(snapshot);
+        // Render the groups into terminal text.
+        let output = render_groups_list_text(&groups);
+
+        // Confirm that the converted group row appears in list output.
+        assert!(output.contains("rg-app | westeurope"));
+    }
+
+    #[test]
+    fn resource_snapshot_tree_renders_only_group_and_resource_names() {
+        // Build a small resource snapshot envelope for tree conversion.
+        let snapshot = sample_resource_snapshot();
+
+        // Group resource names by resource group.
+        let grouped_resources = resource_tree_items_from_snapshot(snapshot);
+        // Render the tree as a fenced Markdown code block.
+        let output = render_resources_tree_markdown(&grouped_resources);
+
+        // Confirm that stdout is exactly the compact Markdown tree shape.
+        assert_eq!(output, "```text\nrg-app\n  app-api\n```\n");
+        // Confirm that intentionally omitted metadata does not leak into the tree.
+        assert!(!output.contains("Microsoft.Web/sites"));
+        // Confirm that intentionally omitted locations do not leak into the tree.
+        assert!(!output.contains("westeurope"));
+    }
+
+    #[test]
+    fn saved_tree_markdown_keeps_single_code_block() {
+        // Build one already-fenced Markdown tree body.
+        let body = "```text\nrg-app\n  app-api\n```\n";
+
+        // Wrap the tree in a saved Markdown report.
+        let markdown = render_saved_inventory_tree_markdown("Azure Resources Tree", body);
+
+        // Confirm that the report starts with the expected title.
+        assert!(markdown.starts_with("# Azure Resources Tree\n\n"));
+        // Confirm that the fenced tree body is included unchanged.
+        assert!(markdown.contains(body));
+        // Confirm that no second text fence was added around the body.
+        assert_eq!(markdown.matches("```text").count(), 1);
     }
 
     #[test]
@@ -1505,5 +1770,60 @@ mod tests {
 
         // Confirm that the output includes the expected group row.
         assert!(output.contains("rg-app | westeurope"));
+    }
+
+    // Build one small resource snapshot envelope for conversion tests.
+    fn sample_resource_snapshot() -> AzureSnapshotEnvelope {
+        // Return a complete envelope with the minimum fields needed by inventory conversion.
+        AzureSnapshotEnvelope {
+            generated_at: String::from("2026-04-28T17:15:46Z"),
+            subscription: sample_snapshot_subscription(),
+            resources: vec![AzureSnapshotResource {
+                normalized: AzureSnapshotNormalizedResource {
+                    id: String::from(
+                        "/subscriptions/sub/resourceGroups/rg-app/providers/web/app-api",
+                    ),
+                    name: String::from("app-api"),
+                    resource_type: String::from("Microsoft.Web/sites"),
+                    resource_group: String::from("rg-app"),
+                    location: String::from("westeurope"),
+                    kind: Value::Null,
+                    sku: Value::Null,
+                    tags: Value::Object(Default::default()),
+                },
+                fingerprint: String::from("resource-fingerprint"),
+                raw: Value::Object(Default::default()),
+            }],
+        }
+    }
+
+    // Build one small group snapshot envelope for conversion tests.
+    fn sample_group_snapshot() -> AzureGroupSnapshotEnvelope {
+        // Return a complete envelope with the minimum fields needed by inventory conversion.
+        AzureGroupSnapshotEnvelope {
+            generated_at: String::from("2026-04-28T17:15:55Z"),
+            subscription: sample_snapshot_subscription(),
+            groups: vec![AzureSnapshotGroup {
+                normalized: AzureSnapshotNormalizedGroup {
+                    id: String::from("/subscriptions/sub/resourceGroups/rg-app"),
+                    name: String::from("rg-app"),
+                    location: String::from("westeurope"),
+                    tags: Value::Object(Default::default()),
+                    managed_by: Value::Null,
+                },
+                fingerprint: String::from("group-fingerprint"),
+                raw: Value::Object(Default::default()),
+            }],
+        }
+    }
+
+    // Build shared subscription metadata for sample snapshot envelopes.
+    fn sample_snapshot_subscription() -> AzureSnapshotSubscription {
+        // Return stable subscription metadata because conversion tests do not inspect it.
+        AzureSnapshotSubscription {
+            id: String::from("sub"),
+            name: String::from("subscription"),
+            user: String::from("user@example.com"),
+        }
     }
 }

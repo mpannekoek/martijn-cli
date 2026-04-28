@@ -95,6 +95,9 @@ pub(crate) enum ReportCommand {
 // Hold the optional `--save` value used by inventory commands.
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SaveArguments {
+    // Accept an optional snapshot file name or stem for local snapshot-based inventory.
+    #[arg(long)]
+    pub(crate) snapshot: Option<String>,
     // Accept `--save` without a value and `--save <name>` with a custom name.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub(crate) save: Option<String>,
@@ -277,8 +280,35 @@ mod tests {
         assert!(matches!(
             parsed_command,
             AzureCommand::Inventory(InventoryCommand::Resources(
-                InventoryResourcesCommand::List(SaveArguments { save: None })
+                InventoryResourcesCommand::List(SaveArguments {
+                    snapshot: None,
+                    save: None
+                })
             ))
+        ));
+    }
+
+    #[test]
+    fn parses_inventory_resources_list_with_snapshot_name() {
+        // Parse the resources list command with an explicit snapshot selector.
+        let parsed_command = parse_command(&[
+            String::from("inventory"),
+            String::from("resources"),
+            String::from("list"),
+            String::from("--snapshot"),
+            String::from("20260428-171547-fc400f1b"),
+        ])
+        .expect("command should parse");
+
+        // Confirm that Clap stores the requested snapshot stem.
+        assert!(matches!(
+            parsed_command,
+            AzureCommand::Inventory(InventoryCommand::Resources(
+                InventoryResourcesCommand::List(SaveArguments {
+                    snapshot: Some(snapshot),
+                    save: None
+                })
+            )) if snapshot == "20260428-171547-fc400f1b"
         ));
     }
 
@@ -297,8 +327,37 @@ mod tests {
         assert!(matches!(
             parsed_command,
             AzureCommand::Inventory(InventoryCommand::Resources(
-                InventoryResourcesCommand::Tree(SaveArguments { save: Some(name) })
+                InventoryResourcesCommand::Tree(SaveArguments {
+                    snapshot: None,
+                    save: Some(name)
+                })
             )) if name.is_empty()
+        ));
+    }
+
+    #[test]
+    fn parses_inventory_resources_tree_with_snapshot_and_save() {
+        // Parse the resources tree command with both snapshot selection and report saving.
+        let parsed_command = parse_command(&[
+            String::from("inventory"),
+            String::from("resources"),
+            String::from("tree"),
+            String::from("--snapshot"),
+            String::from("daily-snapshot"),
+            String::from("--save"),
+            String::from("daily tree"),
+        ])
+        .expect("command should parse");
+
+        // Confirm that Clap keeps both independent option values.
+        assert!(matches!(
+            parsed_command,
+            AzureCommand::Inventory(InventoryCommand::Resources(
+                InventoryResourcesCommand::Tree(SaveArguments {
+                    snapshot: Some(snapshot),
+                    save: Some(name)
+                })
+            )) if snapshot == "daily-snapshot" && name == "daily tree"
         ));
     }
 
@@ -318,7 +377,10 @@ mod tests {
         assert!(matches!(
             parsed_command,
             AzureCommand::Inventory(InventoryCommand::Groups(
-                InventoryGroupsCommand::List(SaveArguments { save: Some(name) })
+                InventoryGroupsCommand::List(SaveArguments {
+                    snapshot: None,
+                    save: Some(name)
+                })
             )) if name == "daily report"
         ));
     }

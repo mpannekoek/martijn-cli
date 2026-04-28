@@ -3,31 +3,23 @@ use crate::azure::service::{
     ArtifactMatch, InventoryReportKind, delete_inventory_report, inventory_reports_directory,
     list_inventory_reports, read_inventory_report, render_inventory_groups_list,
     render_inventory_resources_list, render_inventory_resources_tree,
-    render_saved_inventory_markdown, save_inventory_report_text,
+    render_saved_inventory_markdown, render_saved_inventory_tree_markdown,
+    save_inventory_report_text,
 };
 
 // Import the parsed save option so handlers can decide whether to write a report.
 use super::cli::SaveArguments;
 
-// Import the Azure session state so inventory commands can check the active account.
-use super::state::{SessionState, refresh_session_state};
+// Import the Azure session state type so the runner can keep one consistent handler signature.
+use super::state::SessionState;
 
 // Print Azure resources and optionally save the output as Markdown.
 pub(super) async fn handle_inventory_resources_list(
-    state: &mut SessionState,
+    _state: &mut SessionState,
     arguments: &SaveArguments,
 ) {
-    // Refresh the login state first so the command works with the latest Azure session.
-    refresh_session_state(state).await;
-
-    // Stop early when no Azure account is active.
-    let Some(_) = state.account.as_ref() else {
-        println!("Not logged in to Azure CLI. Run `login <tenant>` first.");
-        return;
-    };
-
-    // Ask the service layer to build the terminal output.
-    match render_inventory_resources_list().await {
+    // Ask the service layer to build output from the selected local snapshot.
+    match render_inventory_resources_list(arguments.snapshot.as_deref()) {
         Ok(output) => {
             // Print the default stdout output for this inventory command.
             print!("{output}");
@@ -48,25 +40,16 @@ pub(super) async fn handle_inventory_resources_list(
 
 // Print Azure resources as a tree and optionally save the output as Markdown.
 pub(super) async fn handle_inventory_resources_tree(
-    state: &mut SessionState,
+    _state: &mut SessionState,
     arguments: &SaveArguments,
 ) {
-    // Refresh the login state first so the command works with the latest Azure session.
-    refresh_session_state(state).await;
-
-    // Stop early when no Azure account is active.
-    let Some(_) = state.account.as_ref() else {
-        println!("Not logged in to Azure CLI. Run `login <tenant>` first.");
-        return;
-    };
-
-    // Ask the service layer to build the terminal output.
-    match render_inventory_resources_tree().await {
+    // Ask the service layer to build output from the selected local snapshot.
+    match render_inventory_resources_tree(arguments.snapshot.as_deref()) {
         Ok(output) => {
             // Print the default stdout output for this inventory command.
             print!("{output}");
-            // Save the output when the user provided `--save`.
-            save_inventory_output_if_requested(
+            // Save the already-fenced Markdown tree when the user provided `--save`.
+            save_inventory_tree_output_if_requested(
                 InventoryReportKind::ResourcesTree,
                 "Azure Resources Tree",
                 arguments,
@@ -82,20 +65,11 @@ pub(super) async fn handle_inventory_resources_tree(
 
 // Print Azure resource groups and optionally save the output as Markdown.
 pub(super) async fn handle_inventory_groups_list(
-    state: &mut SessionState,
+    _state: &mut SessionState,
     arguments: &SaveArguments,
 ) {
-    // Refresh the login state first so the command works with the latest Azure session.
-    refresh_session_state(state).await;
-
-    // Stop early when no Azure account is active.
-    let Some(_) = state.account.as_ref() else {
-        println!("Not logged in to Azure CLI. Run `login <tenant>` first.");
-        return;
-    };
-
-    // Ask the service layer to build the terminal output.
-    match render_inventory_groups_list().await {
+    // Ask the service layer to build output from the selected local snapshot.
+    match render_inventory_groups_list(arguments.snapshot.as_deref()) {
         Ok(output) => {
             // Print the default stdout output for this inventory command.
             print!("{output}");
@@ -226,6 +200,40 @@ fn save_inventory_output_if_requested(
     };
     // Wrap the terminal output in a small Markdown document.
     let markdown = render_saved_inventory_markdown(title, output);
+
+    // Ask the service layer to write the report to the correct directory.
+    match save_inventory_report_text(report_kind, requested_name, &markdown) {
+        Ok(path) => {
+            // Confirm success and show the final path to the newly created report.
+            println!("Azure inventory report saved to {}", path.display());
+        }
+        Err(error) => {
+            // Explain clearly why saving failed while keeping stdout behavior intact.
+            println!("Unable to save the Azure inventory report: {error}");
+        }
+    }
+}
+
+// Save already-Markdown inventory tree output when `--save` was provided.
+fn save_inventory_tree_output_if_requested(
+    report_kind: InventoryReportKind,
+    title: &str,
+    arguments: &SaveArguments,
+    output: &str,
+) {
+    // Stop early when the user did not request a saved report.
+    let Some(requested_name) = arguments.save.as_deref() else {
+        return;
+    };
+
+    // Treat the empty `--save` value as an automatic generated file name.
+    let requested_name = if requested_name.trim().is_empty() {
+        None
+    } else {
+        Some(requested_name)
+    };
+    // Wrap the fenced tree in a Markdown document without adding another code block.
+    let markdown = render_saved_inventory_tree_markdown(title, output);
 
     // Ask the service layer to write the report to the correct directory.
     match save_inventory_report_text(report_kind, requested_name, &markdown) {

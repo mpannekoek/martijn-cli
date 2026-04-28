@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 // Import `BTreeMap` so resource tags can be stored as key/value pairs.
 use std::collections::BTreeMap;
-// Import `BTreeMap` so resource tags can be stored as key/value pairs.
 
 // Hold the account details that the CLI shows in `azure status`.
 #[derive(Debug, Clone)]
@@ -67,7 +66,7 @@ pub(crate) struct AzureInventoryGroup {
 }
 
 // Store the complete JSON document that is written for one Azure snapshot.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct AzureSnapshotEnvelope {
     // Rename this field to the camelCase JSON name requested by the snapshot format.
     #[serde(rename = "generatedAt")]
@@ -79,7 +78,7 @@ pub(crate) struct AzureSnapshotEnvelope {
 }
 
 // Store subscription metadata inside the snapshot envelope.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct AzureSnapshotSubscription {
     // Store the active subscription ID under the short `id` JSON field.
     pub(crate) id: String,
@@ -90,7 +89,7 @@ pub(crate) struct AzureSnapshotSubscription {
 }
 
 // Store one resource entry inside the snapshot document.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct AzureSnapshotResource {
     // Store the stable subset used for comparisons and hashing.
     pub(crate) normalized: AzureSnapshotNormalizedResource,
@@ -101,7 +100,7 @@ pub(crate) struct AzureSnapshotResource {
 }
 
 // Store one resource-group entry inside a group snapshot document.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct AzureSnapshotGroup {
     // Store the stable subset used for comparisons and hashing.
     pub(crate) normalized: AzureSnapshotNormalizedGroup,
@@ -112,7 +111,7 @@ pub(crate) struct AzureSnapshotGroup {
 }
 
 // Store the complete JSON document that is written for one group snapshot.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct AzureGroupSnapshotEnvelope {
     // Rename this field to the camelCase JSON name used by snapshot metadata.
     #[serde(rename = "generatedAt")]
@@ -124,7 +123,7 @@ pub(crate) struct AzureGroupSnapshotEnvelope {
 }
 
 // Store the stable resource shape used by snapshot consumers.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct AzureSnapshotNormalizedResource {
     // Store the Azure resource ID, or an empty string when Azure omitted it.
     pub(crate) id: String,
@@ -147,7 +146,7 @@ pub(crate) struct AzureSnapshotNormalizedResource {
 }
 
 // Store the stable resource-group shape used by snapshot consumers.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct AzureSnapshotNormalizedGroup {
     // Store the Azure resource-group ID, or an empty string when Azure omitted it.
     pub(crate) id: String,
