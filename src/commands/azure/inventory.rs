@@ -3,9 +3,11 @@ use crate::azure::service::{
     ArtifactMatch, InventoryReportKind, delete_inventory_report, inventory_reports_directory,
     list_inventory_reports, read_inventory_report, render_inventory_groups_list,
     render_inventory_resources_list, render_inventory_resources_tree,
-    render_saved_inventory_markdown, render_saved_inventory_resources_list_markdown,
-    render_saved_inventory_resources_tree_markdown, save_inventory_report_text,
+    render_saved_inventory_markdown, save_inventory_report_text,
 };
+
+// Import Termimad's skin type so Markdown reports can be displayed nicely in the terminal.
+use termimad::MadSkin;
 
 // Import the parsed save option so handlers can decide whether to write a report.
 use super::cli::SaveArguments;
@@ -20,11 +22,15 @@ pub(super) async fn handle_inventory_resources_list(
 ) {
     // Ask the service layer to build output from the selected local snapshot.
     match render_inventory_resources_list(arguments.snapshot.as_deref()) {
-        Ok(output) => {
-            // Print the default stdout output for this inventory command.
-            print!("{output}");
-            // Save the rich Markdown report when the user provided `--save`.
-            save_inventory_resources_list_output_if_requested(arguments);
+        Ok(markdown) => {
+            // Render the Markdown report to terminal-friendly styled text for normal stdout.
+            render_markdown_to_terminal(&markdown);
+            // Save the exact same Markdown report when the user provided `--save`.
+            save_inventory_markdown_if_requested(
+                InventoryReportKind::ResourcesList,
+                arguments,
+                &markdown,
+            );
         }
         Err(error) => {
             // Explain clearly why the inventory command could not complete.
@@ -40,14 +46,14 @@ pub(super) async fn handle_inventory_resources_tree(
 ) {
     // Ask the service layer to build output from the selected local snapshot.
     match render_inventory_resources_tree(arguments.snapshot.as_deref()) {
-        Ok(output) => {
-            // Print the default stdout output for this inventory command.
-            print!("{output}");
-            // Save the plain tree as a Markdown report when the user provided `--save`.
-            save_inventory_tree_output_if_requested(
+        Ok(markdown) => {
+            // Render the Markdown report to terminal-friendly styled text for normal stdout.
+            render_markdown_to_terminal(&markdown);
+            // Save the exact same Markdown report when the user provided `--save`.
+            save_inventory_markdown_if_requested(
                 InventoryReportKind::ResourcesTree,
                 arguments,
-                &output,
+                &markdown,
             );
         }
         Err(error) => {
@@ -171,8 +177,22 @@ pub(super) fn handle_report_delete(name: &str) {
     }
 }
 
-// Save the resource list report through the dedicated Markdown template when requested.
-fn save_inventory_resources_list_output_if_requested(arguments: &SaveArguments) {
+// Render Markdown with a small terminal skin so stdout stays readable without changing saved files.
+fn render_markdown_to_terminal(markdown: &str) {
+    // Build a default dark-terminal skin because most CLI users run dark terminal themes.
+    let mut skin = MadSkin::default_dark();
+    // Use ASCII decorations so the rendered Markdown stays predictable on Windows terminals too.
+    skin.limit_to_ascii();
+    // Ask Termimad to parse and print the Markdown as terminal text.
+    skin.print_text(markdown);
+}
+
+// Save an already rendered Markdown report when `--save` was provided.
+fn save_inventory_markdown_if_requested(
+    report_kind: InventoryReportKind,
+    arguments: &SaveArguments,
+    markdown: &str,
+) {
     // Stop early when the user did not request a saved report.
     let Some(requested_name) = arguments.save.as_deref() else {
         return;
@@ -185,23 +205,8 @@ fn save_inventory_resources_list_output_if_requested(arguments: &SaveArguments) 
         Some(requested_name)
     };
 
-    // Render the full resources-list Markdown report from the selected snapshot.
-    let markdown =
-        match render_saved_inventory_resources_list_markdown(arguments.snapshot.as_deref()) {
-            Ok(markdown) => markdown,
-            Err(error) => {
-                // Explain clearly why saving failed while keeping stdout behavior intact.
-                println!("Unable to save the inventory report: {error}");
-                return;
-            }
-        };
-
-    // Ask the service layer to write the report to the resources/list directory.
-    match save_inventory_report_text(
-        InventoryReportKind::ResourcesList,
-        requested_name,
-        &markdown,
-    ) {
+    // Ask the service layer to write the already-rendered Markdown to the correct directory.
+    match save_inventory_report_text(report_kind, requested_name, markdown) {
         Ok(path) => {
             // Confirm success and show the final path to the newly created report.
             println!("Inventory report saved to {}", path.display());
@@ -233,48 +238,6 @@ fn save_inventory_output_if_requested(
     };
     // Wrap the terminal output in a small Markdown document.
     let markdown = render_saved_inventory_markdown(title, output);
-
-    // Ask the service layer to write the report to the correct directory.
-    match save_inventory_report_text(report_kind, requested_name, &markdown) {
-        Ok(path) => {
-            // Confirm success and show the final path to the newly created report.
-            println!("Inventory report saved to {}", path.display());
-        }
-        Err(error) => {
-            // Explain clearly why saving failed while keeping stdout behavior intact.
-            println!("Unable to save the inventory report: {error}");
-        }
-    }
-}
-
-// Save plain inventory tree output as Markdown when `--save` was provided.
-fn save_inventory_tree_output_if_requested(
-    report_kind: InventoryReportKind,
-    arguments: &SaveArguments,
-    output: &str,
-) {
-    // Stop early when the user did not request a saved report.
-    let Some(requested_name) = arguments.save.as_deref() else {
-        return;
-    };
-
-    // Treat the empty `--save` value as an automatic generated file name.
-    let requested_name = if requested_name.trim().is_empty() {
-        None
-    } else {
-        Some(requested_name)
-    };
-    // Render a Markdown report from the snapshot metadata and the exact tree printed to stdout.
-    let markdown =
-        match render_saved_inventory_resources_tree_markdown(arguments.snapshot.as_deref(), output)
-        {
-            Ok(markdown) => markdown,
-            Err(error) => {
-                // Explain clearly why saving failed while keeping stdout behavior intact.
-                println!("Unable to save the inventory report: {error}");
-                return;
-            }
-        };
 
     // Ask the service layer to write the report to the correct directory.
     match save_inventory_report_text(report_kind, requested_name, &markdown) {

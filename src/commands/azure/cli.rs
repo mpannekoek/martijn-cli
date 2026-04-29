@@ -20,7 +20,7 @@ pub(crate) enum AzureCommand {
     Logout,
     /// Show the current Azure login state.
     Status,
-    /// Show Azure inventory data and optionally save Markdown reports.
+    /// Render Azure inventory Markdown reports and optionally save them.
     #[command(subcommand, arg_required_else_help = true)]
     Inventory(InventoryCommand),
     /// Create, list, and delete JSON snapshots.
@@ -34,7 +34,7 @@ pub(crate) enum AzureCommand {
 // List the commands that belong under the Azure `inventory` command group.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InventoryCommand {
-    /// Work with Azure resource inventory.
+    /// Render Azure resource inventory Markdown.
     #[command(name = "resource")]
     #[command(subcommand, arg_required_else_help = true)]
     Resources(InventoryResourcesCommand),
@@ -47,9 +47,9 @@ pub(crate) enum InventoryCommand {
 // List the commands that belong under `inventory resource`.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InventoryResourcesCommand {
-    /// Print Azure resources as a compact list.
+    /// Render Azure resources as a Markdown inventory report.
     List(SaveArguments),
-    /// Print Azure resources grouped as a tree.
+    /// Render Azure resources as a Markdown tree report.
     Tree(SaveArguments),
 }
 
@@ -619,7 +619,24 @@ mod tests {
         // Convert the rendered help into a string so the test can inspect it.
         let rendered_help = error.to_string();
 
-        // Confirm that the help text describes listing Azure resources.
-        assert!(rendered_help.contains("Print Azure resources as a compact list"));
+        // Confirm that the help text describes the Markdown report output.
+        assert!(rendered_help.contains("Render Azure resources as a Markdown inventory report"));
+    }
+
+    #[test]
+    fn inventory_resource_tree_help_describes_markdown_tree_report() {
+        // Ask Clap to render the help text for the inventory resource tree subcommand.
+        let error = parse_command(&[
+            String::from("inventory"),
+            String::from("resource"),
+            String::from("tree"),
+            String::from("-h"),
+        ])
+        .expect_err("help should be returned as a Clap display error");
+        // Convert the rendered help into a string so the test can inspect it.
+        let rendered_help = error.to_string();
+
+        // Confirm that the help text describes the Markdown tree report output.
+        assert!(rendered_help.contains("Render Azure resources as a Markdown tree report"));
     }
 }

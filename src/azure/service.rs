@@ -45,6 +45,7 @@ const INVENTORY_RESOURCES_TREE_TEMPLATE_SOURCE: &str =
     include_str!("templates/inventory.resource.tree.md.tera");
 
 // Store the fields needed for the subscription-wide `inventory resource list` command.
+#[cfg(test)]
 #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
 struct AzureSubscriptionResourceListItem {
     // Store the resource name that users recognize in the Azure portal.
@@ -239,36 +240,27 @@ pub(crate) async fn run_az_service_principal_login(
     Ok(status.success())
 }
 
-// Build a terminal-friendly resources list from a saved resources snapshot.
+// Build the resources-list Markdown document from a saved resources snapshot.
 pub(crate) fn render_inventory_resources_list(snapshot_name: Option<&str>) -> AppResult<String> {
     // Read the selected resource snapshot from local disk.
     let snapshot = read_resource_snapshot(snapshot_name)?;
-    // Convert snapshot entries into the smaller shape used by the list renderer.
-    let mut resources = resource_list_items_from_snapshot(snapshot);
-    // Sort the resources so repeated runs stay easy to compare.
-    sort_subscription_resources(&mut resources);
-    // Render the sorted resources as readable terminal text.
-    Ok(render_resources_list_text(&resources))
+    // Render the loaded snapshot through the shared Markdown path used by stdout and `--save`.
+    render_inventory_resources_list_from_snapshot(snapshot)
 }
 
-// Build a compact plain text resource tree from a saved resources snapshot.
+// Build the resources-tree Markdown document from a saved resources snapshot.
 pub(crate) fn render_inventory_resources_tree(snapshot_name: Option<&str>) -> AppResult<String> {
-    // Read only the resource snapshot because the tree intentionally ignores group snapshots.
-    let snapshot = read_resource_snapshot(snapshot_name)?;
-    // Convert the snapshot into one prepared view that keeps metadata and tree text together.
-    let tree_view = resource_tree_view_from_snapshot(snapshot);
-    // Return only the plain tree body because stdout should not contain Markdown.
-    Ok(tree_view.tree_body)
-}
-
-// Build a saved Markdown report for the resource list using the rich list template.
-pub(crate) fn render_saved_inventory_resources_list_markdown(
-    snapshot_name: Option<&str>,
-) -> AppResult<String> {
     // Read the selected resource snapshot from local disk.
     let snapshot = read_resource_snapshot(snapshot_name)?;
+    // Render the loaded snapshot through the shared Markdown path used by stdout and `--save`.
+    render_inventory_resources_tree_from_snapshot(snapshot)
+}
 
-    // Render the selected snapshot through the shared resources-list template path.
+// Render resources-list Markdown from an already loaded snapshot.
+fn render_inventory_resources_list_from_snapshot(
+    snapshot: AzureSnapshotEnvelope,
+) -> AppResult<String> {
+    // Delegate to the rich resources-list template so there is only one report body shape.
     render_saved_resources_list_markdown_from_snapshot(snapshot)
 }
 
@@ -287,23 +279,19 @@ fn render_saved_resources_list_markdown_from_snapshot(
     render_inventory_markdown(&account, &inventory_groups, total_resource_count)
 }
 
-// Build a saved Markdown report for the resource tree using snapshot metadata.
-pub(crate) fn render_saved_inventory_resources_tree_markdown(
-    snapshot_name: Option<&str>,
-    tree_body: &str,
+// Render resources-tree Markdown from an already loaded snapshot.
+fn render_inventory_resources_tree_from_snapshot(
+    snapshot: AzureSnapshotEnvelope,
 ) -> AppResult<String> {
-    // Read the selected snapshot again so the saved report can include reliable metadata.
-    let snapshot = read_resource_snapshot(snapshot_name)?;
-    // Build the same tree view shape used by stdout so counts and metadata stay consistent.
+    // Build the tree view once so metadata and tree body stay internally consistent.
     let tree_view = resource_tree_view_from_snapshot(snapshot);
-    // Render the final Markdown from the prepared metadata and the caller-provided tree body.
-    render_saved_resources_tree_markdown_from_view(tree_view, tree_body)
+    // Render the final Markdown from that prepared view.
+    render_saved_resources_tree_markdown_from_view(tree_view)
 }
 
 // Render saved resources-tree Markdown from an already prepared tree view.
 fn render_saved_resources_tree_markdown_from_view(
     tree_view: InventoryResourcesTreeView,
-    tree_body: &str,
 ) -> AppResult<String> {
     // Capture the current UTC time once for the saved report metadata.
     let generated_at = OffsetDateTime::now_utc();
@@ -328,7 +316,7 @@ fn render_saved_resources_tree_markdown_from_view(
         azure_user: tree_view.azure_user,
         resource_group_count: tree_view.resource_group_count,
         total_resources: tree_view.total_resources,
-        tree_body: ensure_trailing_newline(tree_body),
+        tree_body: ensure_trailing_newline(&tree_view.tree_body),
     };
     // Convert the strongly typed view into a Tera context for template rendering.
     let template_context = Context::from_serialize(&template_view)
@@ -721,6 +709,7 @@ fn select_snapshot_file_in_directory(
 }
 
 // Convert a resource snapshot into rows for `inventory resource list`.
+#[cfg(test)]
 fn resource_list_items_from_snapshot(
     snapshot: AzureSnapshotEnvelope,
 ) -> Vec<AzureSubscriptionResourceListItem> {
@@ -1406,6 +1395,7 @@ where
 }
 
 // Render resources as compact terminal rows.
+#[cfg(test)]
 fn render_resources_list_text(resources: &[AzureSubscriptionResourceListItem]) -> String {
     // Start with a clear heading so pasted output remains understandable.
     let mut output = String::from("Azure resources\n");
@@ -1577,22 +1567,6 @@ fn ensure_trailing_newline(text: &str) -> String {
     output
 }
 
-// Sort subscription resources by type, group and name case-insensitively.
-fn sort_subscription_resources(resources: &mut [AzureSubscriptionResourceListItem]) {
-    // Compare lowercased values so display order does not depend on Azure casing.
-    resources.sort_by(|left, right| {
-        left.resource_type
-            .to_lowercase()
-            .cmp(&right.resource_type.to_lowercase())
-            .then_with(|| {
-                left.resource_group
-                    .to_lowercase()
-                    .cmp(&right.resource_group.to_lowercase())
-            })
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-    });
-}
-
 // Ask Azure CLI for all resources in the active subscription as raw JSON values.
 async fn fetch_raw_subscription_resources() -> AppResult<Vec<serde_json::Value>> {
     // Capture JSON output because the snapshot must preserve Azure's raw resource objects.
@@ -1758,8 +1732,9 @@ mod tests {
         build_inventory_report_file_name, build_service_principal_login_arguments,
         decode_azure_cli_json_output, group_list_items_from_snapshot,
         list_inventory_reports_in_directory, parse_account_from_tsv, render_groups_list_text,
-        render_resources_list_text, render_resources_tree_text,
-        render_saved_resources_list_markdown_from_snapshot,
+        render_inventory_resources_list_from_snapshot,
+        render_inventory_resources_tree_from_snapshot, render_resources_list_text,
+        render_resources_tree_text, render_saved_resources_list_markdown_from_snapshot,
         render_saved_resources_tree_markdown_from_view, resource_list_items_from_snapshot,
         resource_tree_items_from_snapshot, resource_tree_view_from_snapshot,
         select_snapshot_file_in_directory, slugify_file_stem,
@@ -2080,6 +2055,23 @@ mod tests {
     }
 
     #[test]
+    fn inventory_resources_list_uses_the_same_markdown_as_saved_reports() {
+        // Build the Markdown through the snapshot-based helper that backs saved reports.
+        let saved_markdown =
+            render_saved_resources_list_markdown_from_snapshot(sample_resource_snapshot())
+                .expect("saved resources-list Markdown should render");
+        // Build the Markdown through the normal inventory path from the same snapshot data.
+        let command_markdown =
+            render_inventory_resources_list_from_snapshot(sample_resource_snapshot())
+                .expect("command resources-list Markdown should render");
+
+        // Confirm the saved Markdown remains the rich report format.
+        assert!(saved_markdown.starts_with("# Azure resource inventory\n\n"));
+        // Confirm stdout and `--save` use the exact same Markdown body.
+        assert_eq!(command_markdown, saved_markdown);
+    }
+
+    #[test]
     fn group_snapshot_converts_to_group_list_rows() {
         // Build a small group snapshot envelope for conversion.
         let snapshot = sample_group_snapshot();
@@ -2115,13 +2107,10 @@ mod tests {
 
     #[test]
     fn saved_tree_markdown_includes_metadata_and_one_code_block() {
-        // Build one plain text tree body like the command prints to stdout.
-        let body = "subscription\n └── rg-app\n      └── app-api\n";
-
         // Build a prepared tree view from the sample snapshot metadata.
         let tree_view = resource_tree_view_from_snapshot(sample_resource_snapshot());
         // Render the tree in the saved Markdown report template.
-        let markdown = render_saved_resources_tree_markdown_from_view(tree_view, body)
+        let markdown = render_saved_resources_tree_markdown_from_view(tree_view)
             .expect("saved tree Markdown should render");
 
         // Confirm that the report starts with the template title.
@@ -2134,10 +2123,32 @@ mod tests {
         assert!(markdown.contains("- Resource groups: 1"));
         // Confirm that total resource counts from the snapshot are included.
         assert!(markdown.contains("- Total resources: 1"));
-        // Confirm that the plain stdout tree body is included unchanged.
-        assert!(markdown.contains(body));
+        // Confirm that the plain tree body is included unchanged inside the Markdown report.
+        assert!(markdown.contains("subscription\n └── rg-app\n      └── app-api\n"));
         // Confirm that exactly one text fence wraps the plain tree body.
         assert_eq!(markdown.matches("```text").count(), 1);
+    }
+
+    #[test]
+    fn inventory_resources_tree_uses_the_saved_markdown_template_shape() {
+        // Render the command Markdown from a sample snapshot.
+        let command_markdown =
+            render_inventory_resources_tree_from_snapshot(sample_resource_snapshot())
+                .expect("command tree Markdown should render");
+        // Build a prepared tree view from the same sample snapshot metadata.
+        let tree_view = resource_tree_view_from_snapshot(sample_resource_snapshot());
+        // Render the same Markdown shape used by both stdout and `--save`.
+        let saved_markdown = render_saved_resources_tree_markdown_from_view(tree_view)
+            .expect("tree Markdown should render");
+
+        // Confirm that tree inventory output is now a Markdown document, not only the raw tree.
+        assert!(command_markdown.starts_with("# Azure resources Inventory tree\n\n"));
+        // Confirm the Markdown still carries the compact tree as a fenced text block.
+        assert!(
+            command_markdown.contains("```text\nsubscription\n └── rg-app\n      └── app-api\n")
+        );
+        // Confirm stdout and `--save` use the exact same Markdown body.
+        assert_eq!(command_markdown, saved_markdown);
     }
 
     #[test]
