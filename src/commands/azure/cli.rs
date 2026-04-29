@@ -34,15 +34,17 @@ pub(crate) enum AzureCommand {
 // List the commands that belong under the Azure `inventory` command group.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InventoryCommand {
-    /// Work with Azure resources.
+    /// Work with Azure resource inventory.
+    #[command(name = "resource")]
     #[command(subcommand, arg_required_else_help = true)]
     Resources(InventoryResourcesCommand),
-    /// Work with Azure resource groups.
+    /// Work with Azure resource-group inventory.
+    #[command(name = "group")]
     #[command(subcommand, arg_required_else_help = true)]
     Groups(InventoryGroupsCommand),
 }
 
-// List the commands that belong under `inventory resources`.
+// List the commands that belong under `inventory resource`.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InventoryResourcesCommand {
     /// Print Azure resources as a compact list.
@@ -51,7 +53,7 @@ pub(crate) enum InventoryResourcesCommand {
     Tree(SaveArguments),
 }
 
-// List the commands that belong under `inventory groups`.
+// List the commands that belong under `inventory group`.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InventoryGroupsCommand {
     /// Print Azure resource groups as a compact list.
@@ -74,8 +76,10 @@ pub(crate) enum SnapshotCommand {
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SnapshotCreateCommand {
     /// Create a resource snapshot.
+    #[command(name = "resource")]
     Resources,
     /// Create a resource-group snapshot.
+    #[command(name = "group")]
     Groups,
     /// Create both resource and resource-group snapshots.
     All,
@@ -267,16 +271,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_inventory_resources_list_without_save() {
-        // Parse the resources list command without saving a report.
+    fn parses_inventory_resource_list_without_save() {
+        // Parse the resource list command without saving a report.
         let parsed_command = parse_command(&[
             String::from("inventory"),
-            String::from("resources"),
+            String::from("resource"),
             String::from("list"),
         ])
         .expect("command should parse");
 
-        // Confirm that Clap routes the nested command to the resources list variant.
+        // Confirm that Clap routes the nested command to the resource list variant.
         assert!(matches!(
             parsed_command,
             AzureCommand::Inventory(InventoryCommand::Resources(
@@ -289,11 +293,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_inventory_resources_list_with_snapshot_name() {
-        // Parse the resources list command with an explicit snapshot selector.
+    fn parses_inventory_resource_list_with_snapshot_name() {
+        // Parse the resource list command with an explicit snapshot selector.
         let parsed_command = parse_command(&[
             String::from("inventory"),
-            String::from("resources"),
+            String::from("resource"),
             String::from("list"),
             String::from("--snapshot"),
             String::from("20260428-171547-fc400f1b"),
@@ -313,11 +317,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_inventory_resources_tree_with_bare_save() {
-        // Parse the resources tree command with `--save` but no custom name.
+    fn parses_inventory_resource_tree_with_bare_save() {
+        // Parse the resource tree command with `--save` but no custom name.
         let parsed_command = parse_command(&[
             String::from("inventory"),
-            String::from("resources"),
+            String::from("resource"),
             String::from("tree"),
             String::from("--save"),
         ])
@@ -336,11 +340,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_inventory_resources_tree_with_snapshot_and_save() {
-        // Parse the resources tree command with both snapshot selection and report saving.
+    fn parses_inventory_resource_tree_with_snapshot_and_save() {
+        // Parse the resource tree command with both snapshot selection and report saving.
         let parsed_command = parse_command(&[
             String::from("inventory"),
-            String::from("resources"),
+            String::from("resource"),
             String::from("tree"),
             String::from("--snapshot"),
             String::from("daily-snapshot"),
@@ -362,11 +366,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_inventory_groups_list_with_named_save() {
-        // Parse the groups list command with a custom report name.
+    fn parses_inventory_group_list_with_named_save() {
+        // Parse the group list command with a custom report name.
         let parsed_command = parse_command(&[
             String::from("inventory"),
-            String::from("groups"),
+            String::from("group"),
             String::from("list"),
             String::from("--save"),
             String::from("daily report"),
@@ -386,16 +390,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_snapshot_create_resources_as_a_real_command() {
+    fn parses_snapshot_create_resource_as_a_real_command() {
         // Parse the snapshot command that writes a resource snapshot.
         let parsed_command = parse_command(&[
             String::from("snapshot"),
             String::from("create"),
-            String::from("resources"),
+            String::from("resource"),
         ])
         .expect("command should parse");
 
-        // Confirm that Clap routes the nested command to the create resources variant.
+        // Confirm that Clap routes the nested command to the create resource variant.
         assert!(matches!(
             parsed_command,
             AzureCommand::Snapshot(SnapshotCommand::Create(SnapshotCreateCommand::Resources))
@@ -403,16 +407,16 @@ mod tests {
     }
 
     #[test]
-    fn parses_snapshot_create_groups_as_a_real_command() {
+    fn parses_snapshot_create_group_as_a_real_command() {
         // Parse the snapshot command that writes a group snapshot.
         let parsed_command = parse_command(&[
             String::from("snapshot"),
             String::from("create"),
-            String::from("groups"),
+            String::from("group"),
         ])
         .expect("command should parse");
 
-        // Confirm that Clap routes the nested command to the create groups variant.
+        // Confirm that Clap routes the nested command to the create group variant.
         assert!(matches!(
             parsed_command,
             AzureCommand::Snapshot(SnapshotCommand::Create(SnapshotCreateCommand::Groups))
@@ -537,18 +541,62 @@ mod tests {
         );
         // Confirm that the inventory command help shows the nested command usage.
         assert!(rendered_error.contains("Usage: azure inventory <COMMAND>"));
-        // Confirm that the inventory command help lists the resources subcommand.
-        assert!(rendered_error.contains("resources"));
-        // Confirm that the inventory command help lists the groups subcommand.
-        assert!(rendered_error.contains("groups"));
+        // Confirm that the inventory command help lists the resource subcommand.
+        assert!(rendered_error.contains("resource"));
+        // Confirm that the inventory command help lists the group subcommand.
+        assert!(rendered_error.contains("group"));
     }
 
     #[test]
-    fn inventory_resources_list_help_is_reported_as_display_help() {
-        // Parse `inventory resources list -h`, which Clap represents as a help display request.
-        let error = parse_command(&[
+    fn rejects_plural_resource_and_group_subcommands() {
+        // Parse the old plural inventory resource command.
+        let inventory_resource_error = parse_command(&[
             String::from("inventory"),
             String::from("resources"),
+            String::from("list"),
+        ])
+        .expect_err("plural inventory resource command should fail");
+        // Parse the old plural inventory group command.
+        let inventory_group_error = parse_command(&[
+            String::from("inventory"),
+            String::from("groups"),
+            String::from("list"),
+        ])
+        .expect_err("plural inventory group command should fail");
+        // Parse the old plural snapshot resource command.
+        let snapshot_resource_error = parse_command(&[
+            String::from("snapshot"),
+            String::from("create"),
+            String::from("resources"),
+        ])
+        .expect_err("plural snapshot resource command should fail");
+        // Parse the old plural snapshot group command.
+        let snapshot_group_error = parse_command(&[
+            String::from("snapshot"),
+            String::from("create"),
+            String::from("groups"),
+        ])
+        .expect_err("plural snapshot group command should fail");
+
+        // Confirm that Clap treats the old inventory resource command as an unknown subcommand.
+        assert_eq!(
+            inventory_resource_error.kind(),
+            ErrorKind::InvalidSubcommand
+        );
+        // Confirm that Clap treats the old inventory group command as an unknown subcommand.
+        assert_eq!(inventory_group_error.kind(), ErrorKind::InvalidSubcommand);
+        // Confirm that Clap treats the old snapshot resource command as an unknown subcommand.
+        assert_eq!(snapshot_resource_error.kind(), ErrorKind::InvalidSubcommand);
+        // Confirm that Clap treats the old snapshot group command as an unknown subcommand.
+        assert_eq!(snapshot_group_error.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn inventory_resource_list_help_is_reported_as_display_help() {
+        // Parse `inventory resource list -h`, which Clap represents as a help display request.
+        let error = parse_command(&[
+            String::from("inventory"),
+            String::from("resource"),
             String::from("list"),
             String::from("-h"),
         ])
@@ -559,11 +607,11 @@ mod tests {
     }
 
     #[test]
-    fn inventory_resources_list_help_describes_resource_listing() {
-        // Ask Clap to render the help text for the inventory resources list subcommand.
+    fn inventory_resource_list_help_describes_resource_listing() {
+        // Ask Clap to render the help text for the inventory resource list subcommand.
         let error = parse_command(&[
             String::from("inventory"),
-            String::from("resources"),
+            String::from("resource"),
             String::from("list"),
             String::from("-h"),
         ])

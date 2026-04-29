@@ -44,7 +44,7 @@ const INVENTORY_RESOURCES_TREE_TEMPLATE_NAME: &str = "inventory.resource.tree.md
 const INVENTORY_RESOURCES_TREE_TEMPLATE_SOURCE: &str =
     include_str!("templates/inventory.resource.tree.md.tera");
 
-// Store the fields needed for the subscription-wide `inventory resources list` command.
+// Store the fields needed for the subscription-wide `inventory resource list` command.
 #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
 struct AzureSubscriptionResourceListItem {
     // Store the resource name that users recognize in the Azure portal.
@@ -114,11 +114,11 @@ pub(crate) struct InventoryReportFile {
 // Describe the inventory report shape that decides where a saved report belongs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InventoryReportKind {
-    // Store reports created by `inventory resources list`.
+    // Store reports created by `inventory resource list`.
     ResourcesList,
-    // Store reports created by `inventory resources tree`.
+    // Store reports created by `inventory resource tree`.
     ResourcesTree,
-    // Store reports created by `inventory groups list`.
+    // Store reports created by `inventory group list`.
     GroupsList,
 }
 
@@ -720,7 +720,7 @@ fn select_snapshot_file_in_directory(
     })
 }
 
-// Convert a resource snapshot into rows for `inventory resources list`.
+// Convert a resource snapshot into rows for `inventory resource list`.
 fn resource_list_items_from_snapshot(
     snapshot: AzureSnapshotEnvelope,
 ) -> Vec<AzureSubscriptionResourceListItem> {
@@ -745,7 +745,7 @@ fn resource_list_items_from_snapshot(
     resources
 }
 
-// Convert a group snapshot into rows for `inventory groups list`.
+// Convert a group snapshot into rows for `inventory group list`.
 fn group_list_items_from_snapshot(
     snapshot: AzureGroupSnapshotEnvelope,
 ) -> Vec<AzureResourceGroupReportItem> {
@@ -1217,10 +1217,10 @@ fn snapshot_kind_directory_name(snapshot_kind: SnapshotKind) -> &'static str {
 
 // Return the user-facing label for one snapshot kind.
 pub(crate) fn snapshot_kind_label(snapshot_kind: SnapshotKind) -> &'static str {
-    // Match every snapshot kind to the same word that users see in the snapshot folder names.
+    // Match every snapshot kind to the singular subcommand word that users type.
     match snapshot_kind {
-        SnapshotKind::Resources => "resources",
-        SnapshotKind::Groups => "groups",
+        SnapshotKind::Resources => "resource",
+        SnapshotKind::Groups => "group",
     }
 }
 
@@ -1854,7 +1854,7 @@ mod tests {
         // Create the temporary directory before writing report files into it.
         fs::create_dir_all(&directory).expect("temporary directory should be created");
 
-        // Build the report leaf directory used by `inventory resources list`.
+        // Build the report leaf directory used by `inventory resource list`.
         let report_directory = directory.join("resources").join("list");
         // Create the temporary report directory before writing report files into it.
         fs::create_dir_all(&report_directory).expect("report directory should be created");
@@ -1999,7 +1999,7 @@ mod tests {
         let message = error.to_string();
 
         // Confirm that the message tells the user which snapshot command to run.
-        assert!(message.contains("snapshot create resources"));
+        assert!(message.contains("snapshot create resource"));
     }
 
     #[test]
