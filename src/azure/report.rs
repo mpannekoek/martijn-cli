@@ -43,19 +43,32 @@ struct SummaryCountRow {
     count: usize,
 }
 
-// Store one rendered resource row for the Markdown table.
+// Store one rendered resource row for the compact Markdown resource list.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct InventoryResourceView {
-    // Store the escaped resource name cell value.
+    // Store the escaped resource name shown in the bullet label.
     name: String,
-    // Store the escaped resource type cell value.
-    resource_type: String,
-    // Store the escaped resource location cell value.
+    // Store the escaped resource location shown after the resource name.
     location: String,
-    // Store the escaped SKU cell value.
+    // Store the escaped SKU value shown after the location.
     sku: String,
-    // Store the escaped tags cell value.
+    // Store whether the resource has a real SKU so the template can hide empty SKU lines.
+    has_sku: bool,
+    // Store the escaped tags value shown on a nested line when tags exist.
     tags: String,
+    // Store whether the resource has real tags so the template can hide empty tag lines.
+    has_tags: bool,
+}
+
+// Store one group of resources that share the same Azure resource type.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct InventoryResourceTypeView {
+    // Store the escaped Azure resource type heading.
+    name: String,
+    // Store how many resources belong to this type inside the current resource group.
+    total_resources: usize,
+    // Store the rendered resources for this type.
+    resources: Vec<InventoryResourceView>,
 }
 
 // Store one rendered resource-group section in the final report.
@@ -65,10 +78,12 @@ struct InventoryGroupView {
     name: String,
     // Store the escaped resource-group location for section headings.
     location: String,
+    // Store whether the resource-group location is known.
+    has_location: bool,
     // Store how many resources the group contains.
     total_resources: usize,
-    // Store the group's rendered resource rows.
-    resources: Vec<InventoryResourceView>,
+    // Store resources grouped by Azure resource type for compact scanning.
+    resource_types: Vec<InventoryResourceTypeView>,
 }
 
 // Store the full report data that the Tera template needs.
@@ -384,50 +399,106 @@ fn collect_non_standard_regions(inventory_groups: &[AzureInventoryGroup]) -> Vec
         .collect()
 }
 
-// Build rendered group sections, including one table row per resource.
+// Build rendered group sections with resources grouped by Azure resource type.
 fn build_group_views(inventory_groups: &[AzureInventoryGroup]) -> Vec<InventoryGroupView> {
     // Prepare an output vector sized to the number of incoming groups.
     let mut group_views: Vec<InventoryGroupView> = Vec::with_capacity(inventory_groups.len());
 
     // Render each input group into one output view.
     for inventory_group in inventory_groups {
-        // Build rendered resource rows for the current group.
-        let mut resource_views: Vec<InventoryResourceView> =
-            Vec::with_capacity(inventory_group.resources.len());
+        // Build rendered resource type sections for the current group.
+        let resource_types = build_resource_type_views(&inventory_group.resources);
 
-        // Render every resource into a Markdown-safe table row.
-        for resource in &inventory_group.resources {
-            // Normalize missing locations to a clear placeholder.
-            let location = normalize_non_empty_value(&resource.location, "-");
-            // Build the final SKU value using the agreed fallback chain.
-            let sku = resolve_resource_sku(resource);
-            // Build the final tags value as a readable `k=v` comma-separated string.
-            let tags = format_resource_tags(resource);
-
-            // Store one rendered table row.
-            resource_views.push(InventoryResourceView {
-                name: escape_markdown_table_cell(&resource.name),
-                resource_type: escape_markdown_table_cell(&resource.resource_type),
-                location: escape_markdown_table_cell(&location),
-                sku: escape_markdown_table_cell(&sku),
-                tags: escape_markdown_table_cell(&tags),
-            });
-        }
+        // Normalize the resource-group location once so display and fallback stay consistent.
+        let group_location =
+            normalize_non_empty_value(&inventory_group.resource_group.location, "-");
+        // Remember whether the group has a real location before the template renders it.
+        let has_location = group_location != "-";
 
         // Store one rendered section for the current resource group.
         group_views.push(InventoryGroupView {
             name: escape_markdown_heading(&inventory_group.resource_group.name),
-            location: escape_markdown_heading(&normalize_non_empty_value(
-                &inventory_group.resource_group.location,
-                "-",
-            )),
+            location: escape_markdown_heading(&group_location),
+            has_location,
             total_resources: inventory_group.resources.len(),
-            resources: resource_views,
+            resource_types,
         });
     }
 
     // Return all rendered group sections.
     group_views
+}
+
+// Build rendered resource type sections for one resource group.
+fn build_resource_type_views(
+    resources: &[AzureResourceReportItem],
+) -> Vec<InventoryResourceTypeView> {
+    // Use a map so resources with the same type end up below one heading.
+    let mut resources_by_type: BTreeMap<String, (String, Vec<InventoryResourceView>)> =
+        BTreeMap::new();
+
+    // Render every resource and place it in the bucket for its Azure resource type.
+    for resource in resources {
+        // Normalize missing type values so the heading stays visible.
+        let resource_type = normalize_non_empty_value(&resource.resource_type, "-");
+        // Use a lowercase key so grouping is case-insensitive.
+        let normalized_type_key = resource_type.to_lowercase();
+        // Render the resource fields once before moving them into the bucket.
+        let resource_view = build_resource_view(resource);
+
+        // Insert a new type bucket or append to the existing one.
+        match resources_by_type.get_mut(&normalized_type_key) {
+            Some((_, resource_views)) => {
+                resource_views.push(resource_view);
+            }
+            None => {
+                resources_by_type.insert(normalized_type_key, (resource_type, vec![resource_view]));
+            }
+        }
+    }
+
+    // Convert the map into serializable type sections.
+    let mut resource_type_views: Vec<InventoryResourceTypeView> = Vec::new();
+
+    // Move every map value into the final view shape.
+    for (_, (resource_type, resource_views)) in resources_by_type {
+        // Count resources before moving the vector into the view.
+        let total_resources = resource_views.len();
+
+        // Store one rendered type section.
+        resource_type_views.push(InventoryResourceTypeView {
+            name: escape_markdown_heading(&resource_type),
+            total_resources,
+            resources: resource_views,
+        });
+    }
+
+    // Return resource types in deterministic alphabetical order.
+    resource_type_views
+}
+
+// Build one rendered resource entry for the compact Markdown list.
+fn build_resource_view(resource: &AzureResourceReportItem) -> InventoryResourceView {
+    // Normalize missing locations to a clear placeholder.
+    let location = normalize_non_empty_value(&resource.location, "-");
+    // Build the final SKU value using the agreed fallback chain.
+    let sku = resolve_resource_sku(resource);
+    // Remember whether the SKU contains useful information before escaping it.
+    let has_sku = sku != "-";
+    // Build the final tags value as a readable `k=v` comma-separated string.
+    let tags = format_resource_tags(resource);
+    // Remember whether tags are meaningful before escaping the display value.
+    let has_tags = tags != "-";
+
+    // Return one Markdown-safe resource view.
+    InventoryResourceView {
+        name: escape_markdown_text(&resource.name),
+        location: escape_markdown_text(&location),
+        sku: escape_markdown_text(&sku),
+        has_sku,
+        tags: escape_markdown_text(&tags),
+        has_tags,
+    }
 }
 
 // Resolve the final SKU string using `sku.name -> kind -> -` fallback order.
@@ -578,21 +649,6 @@ fn escape_markdown_heading(value: &str) -> String {
     escape_markdown_text(value)
 }
 
-// Escape values that are rendered inside Markdown table cells.
-fn escape_markdown_table_cell(value: &str) -> String {
-    // Escape table separators, formatting markers and multiline values.
-    value
-        .replace('\\', "\\\\")
-        .replace('|', "\\|")
-        .replace('*', "\\*")
-        .replace('_', "\\_")
-        .replace('[', "\\[")
-        .replace(']', "\\]")
-        .replace('`', "\\`")
-        .replace('\r', "")
-        .replace('\n', "<br>")
-}
-
 #[cfg(test)]
 mod tests {
     // Import the Azure helpers that the tests verify.
@@ -712,7 +768,7 @@ mod tests {
             user: String::from("user-123"),
         };
 
-        // Build one tagged resource so table rendering can be verified.
+        // Build one tagged resource so compact resource rendering can be verified.
         let mut tagged_resource_tags = BTreeMap::new();
         tagged_resource_tags.insert(String::from("env"), String::from("prod"));
 
@@ -757,8 +813,8 @@ mod tests {
         let markdown = render_inventory_markdown(&account, &inventory_groups, 2)
             .expect("inventory markdown should render successfully");
 
-        // Confirm that the current resource inventory template heading is rendered.
-        assert!(markdown.starts_with("# Azure resource Inventory\n\n"));
+        // Confirm that the current resource inventory list template heading is rendered.
+        assert!(markdown.starts_with("# Azure resource inventory\n\n"));
         // Confirm that YAML front matter is no longer present.
         assert!(!markdown.starts_with("---\n"));
         // Confirm that metadata bullets are rendered.
@@ -766,22 +822,24 @@ mod tests {
         assert!(markdown.contains("- Subscription: Prod (sub-123)"));
         // Confirm that summary sections are present.
         assert!(markdown.contains("## Summary"));
-        assert!(markdown.contains("### Resources per type"));
-        assert!(markdown.contains("### Resources per region"));
+        assert!(markdown.contains("### Resource types"));
+        assert!(markdown.contains("### Regions"));
         assert!(markdown.contains("### Empty resource groups"));
         assert!(markdown.contains("### Signals"));
-        // Confirm that group sections and table headers are present.
-        assert!(markdown.contains("## rg-app-prod (westeurope)"));
-        assert!(markdown.contains("| Name | Type | Location | SKU | Tags |"));
-        // Confirm that the first row is rendered and that no blank line splits it from separator.
+        // Confirm that group sections and resource type headings are present.
+        assert!(markdown.contains("### rg-app-prod (westeurope)"));
+        assert!(markdown.contains("#### Microsoft.Web/sites (1)"));
+        assert!(markdown.contains("#### Microsoft.Storage/storageAccounts (1)"));
+        // Confirm that the HTML details layout is no longer rendered.
+        assert!(!markdown.contains("<details>"));
+        assert!(!markdown.contains("<summary>"));
+        // Confirm that the first resource is rendered as a compact bullet with metadata lines.
         assert!(
-            markdown.contains("| app-api | Microsoft.Web/sites | westeurope | P1v3 | env=prod |")
+            markdown
+                .contains("- app-api\n  - Location: westeurope\n  - SKU: P1v3\n  - Tags: env=prod")
         );
-        assert!(
-            !markdown.contains(
-                "| Name | Type | Location | SKU | Tags |\n|------|------|----------|-----|------|\n\n| app-api | Microsoft.Web/sites | westeurope | P1v3 | env=prod |"
-            )
-        );
+        // Confirm that the old wide table layout is no longer rendered.
+        assert!(!markdown.contains("| Name | Type | Location | SKU | Tags |"));
     }
 
     #[test]
@@ -836,15 +894,12 @@ mod tests {
         assert!(markdown.contains("env=prod, owner=team-a"));
         // Confirm that `hidden-*` tags are removed from rendered output.
         assert!(!markdown.contains("hidden-link:/subscriptions/test=Resource"));
-        // Confirm that missing tags are rendered as a dash.
-        assert!(
-            markdown
-                .contains("| untagged | Microsoft.Storage/storageAccounts | westeurope | - | - |")
-        );
+        // Confirm that missing tags do not produce noisy `Tags: -` lines.
+        assert!(!markdown.contains("Tags: -"));
     }
 
     #[test]
-    fn render_inventory_markdown_keeps_resource_rows_on_separate_table_lines() {
+    fn render_inventory_markdown_keeps_resource_bullets_on_separate_lines() {
         // Create a sample account for metadata rendering.
         let account = AzureAccount {
             name: String::from("Prod"),
@@ -852,7 +907,7 @@ mod tests {
             user: String::from("user-123"),
         };
 
-        // Create one group with two resources that should render as two table rows.
+        // Create one group with two resources that should render as two bullet rows.
         let inventory_groups = vec![AzureInventoryGroup {
             resource_group: AzureResourceGroupReportItem {
                 name: String::from("rg-demo"),
@@ -882,15 +937,11 @@ mod tests {
         let markdown = render_inventory_markdown(&account, &inventory_groups, 2)
             .expect("inventory markdown should render successfully");
 
-        // Confirm that each resource appears as its own markdown table row.
-        assert!(markdown.contains("| resource-a | Microsoft.Web/sites | westeurope | - | - |"));
-        assert!(markdown.contains("| resource-b | Microsoft.Web/sites | westeurope | - | - |"));
-        // Confirm that no blank line appears between adjacent resource rows.
-        assert!(
-            !markdown.contains(
-                "| resource-a | Microsoft.Web/sites | westeurope | - | - |\n\n| resource-b | Microsoft.Web/sites | westeurope | - | - |"
-            )
-        );
+        // Confirm that each resource appears as its own compact bullet.
+        assert!(markdown.contains("- resource-a\n  - Location: westeurope"));
+        assert!(markdown.contains("- resource-b\n  - Location: westeurope"));
+        // Confirm that both resources appear under one shared type heading.
+        assert_eq!(markdown.matches("#### Microsoft.Web/sites (2)").count(), 1);
     }
 
     #[test]
@@ -930,11 +981,10 @@ mod tests {
         let markdown = render_inventory_markdown(&account, &inventory_groups, 1)
             .expect("inventory markdown should render successfully");
 
-        // Confirm that the tags column falls back to a dash after filtering hidden tags.
-        assert!(
-            markdown
-                .contains("| resource-hidden-only | Microsoft.Web/sites | westeurope | - | - |")
-        );
+        // Confirm that the resource is still shown after hidden tags are filtered out.
+        assert!(markdown.contains("- resource-hidden-only\n  - Location: westeurope"));
+        // Confirm that hidden-only tags do not produce a tags line.
+        assert!(!markdown.contains("Tags: -"));
     }
 
     #[test]

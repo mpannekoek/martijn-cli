@@ -1,10 +1,14 @@
 // Import the Azure data model types shared by commands and report layers.
 use crate::azure::model::{
-    AzureAccount, AzureGroupSnapshotEnvelope, AzureResourceGroupReportItem, AzureSnapshotEnvelope,
+    AzureAccount, AzureGroupSnapshotEnvelope, AzureInventoryGroup, AzureResourceGroupReportItem,
+    AzureResourceReportItem, AzureResourceSkuReportItem, AzureSnapshotEnvelope,
     AzureSnapshotNormalizedResource,
 };
 // Import the Azure report helpers used to sort, render and locate output files.
-use crate::azure::report::{resolve_inventory_output_directory, sort_resource_groups};
+use crate::azure::report::{
+    count_total_resources, render_inventory_markdown, resolve_inventory_output_directory,
+    sort_resource_groups, sort_resources,
+};
 // Import the Azure snapshot helpers used to normalize, render and locate JSON snapshots.
 use crate::azure::snapshot::{
     build_group_snapshot_envelope, build_snapshot_envelope, build_snapshot_file_name,
@@ -255,6 +259,32 @@ pub(crate) fn render_inventory_resources_tree(snapshot_name: Option<&str>) -> Ap
     let tree_view = resource_tree_view_from_snapshot(snapshot);
     // Return only the plain tree body because stdout should not contain Markdown.
     Ok(tree_view.tree_body)
+}
+
+// Build a saved Markdown report for the resource list using the rich list template.
+pub(crate) fn render_saved_inventory_resources_list_markdown(
+    snapshot_name: Option<&str>,
+) -> AppResult<String> {
+    // Read the selected resource snapshot from local disk.
+    let snapshot = read_resource_snapshot(snapshot_name)?;
+
+    // Render the selected snapshot through the shared resources-list template path.
+    render_saved_resources_list_markdown_from_snapshot(snapshot)
+}
+
+// Render a saved resources-list Markdown report from an already loaded snapshot.
+fn render_saved_resources_list_markdown_from_snapshot(
+    snapshot: AzureSnapshotEnvelope,
+) -> AppResult<String> {
+    // Convert snapshot metadata into the account model expected by the template renderer.
+    let account = account_from_resource_snapshot(&snapshot);
+    // Convert the flat snapshot resources into resource-group sections for the report template.
+    let inventory_groups = inventory_groups_from_resource_snapshot(snapshot);
+    // Count resources through the shared report helper so the template receives consistent totals.
+    let total_resource_count = count_total_resources(&inventory_groups);
+
+    // Render the final Markdown with `inventory.resource.list.md.tera`.
+    render_inventory_markdown(&account, &inventory_groups, total_resource_count)
 }
 
 // Build a saved Markdown report for the resource tree using snapshot metadata.
@@ -735,6 +765,148 @@ fn group_list_items_from_snapshot(
 
     // Return the converted group rows.
     groups
+}
+
+// Build the account shape required by the Markdown report from snapshot metadata.
+fn account_from_resource_snapshot(snapshot: &AzureSnapshotEnvelope) -> AzureAccount {
+    // Clone the subscription metadata because the returned account owns its strings.
+    AzureAccount {
+        name: snapshot.subscription.name.clone(),
+        subscription_id: snapshot.subscription.id.clone(),
+        user: snapshot.subscription.user.clone(),
+    }
+}
+
+// Convert a flat resource snapshot into grouped inventory data for the list report.
+fn inventory_groups_from_resource_snapshot(
+    snapshot: AzureSnapshotEnvelope,
+) -> Vec<AzureInventoryGroup> {
+    // Use a BTreeMap so resource-group sections are deterministic before final sorting.
+    let mut groups_by_name: BTreeMap<String, AzureInventoryGroup> = BTreeMap::new();
+
+    // Move every resource out of the snapshot so conversion does not need extra cloning.
+    for snapshot_resource in snapshot.resources {
+        // Move the normalized resource into a local variable for clear ownership.
+        let normalized = snapshot_resource.normalized;
+        // Normalize the resource-group name because an empty heading would be hard to read.
+        let resource_group_name = display_value(&normalized.resource_group);
+        // Convert the normalized snapshot resource into the report resource row shape.
+        let report_resource = report_resource_from_snapshot_resource(normalized);
+
+        // Insert the group on first use, then reuse it for all later resources in that group.
+        let inventory_group = groups_by_name
+            .entry(resource_group_name.clone())
+            .or_insert_with(|| AzureInventoryGroup {
+                resource_group: AzureResourceGroupReportItem {
+                    name: resource_group_name,
+                    // Leave group location empty because resource snapshots do not contain group metadata.
+                    location: String::new(),
+                },
+                resources: Vec::new(),
+            });
+
+        // Store the converted resource inside its owning group.
+        inventory_group.resources.push(report_resource);
+    }
+
+    // Move the grouped data into a vector for the existing report renderer.
+    let mut inventory_groups: Vec<AzureInventoryGroup> = groups_by_name.into_values().collect();
+
+    // Sort each group's resources by type and name, matching the old report behavior.
+    for inventory_group in &mut inventory_groups {
+        sort_resources(&mut inventory_group.resources);
+    }
+
+    // Sort the resource-group sections case-insensitively for stable report output.
+    inventory_groups
+        .sort_by_key(|inventory_group| inventory_group.resource_group.name.to_lowercase());
+
+    // Return the grouped inventory model.
+    inventory_groups
+}
+
+// Convert one normalized snapshot resource into the richer report resource row shape.
+fn report_resource_from_snapshot_resource(
+    normalized: AzureSnapshotNormalizedResource,
+) -> AzureResourceReportItem {
+    // Convert the flexible JSON `kind` field into an optional string for SKU fallback rendering.
+    let kind = optional_string_from_json_value(normalized.kind);
+    // Convert the flexible JSON `sku` field into the small SKU shape used by the report.
+    let sku = report_sku_from_json_value(normalized.sku);
+    // Convert the flexible JSON `tags` object into a deterministic string map.
+    let tags = report_tags_from_json_value(normalized.tags);
+
+    // Return the report row with only fields that the Markdown template needs.
+    AzureResourceReportItem {
+        name: normalized.name,
+        resource_type: normalized.resource_type,
+        location: normalized.location,
+        kind,
+        tags,
+        sku,
+    }
+}
+
+// Read an optional string from a JSON value.
+fn optional_string_from_json_value(value: serde_json::Value) -> Option<String> {
+    // Keep real JSON strings as Rust strings.
+    match value {
+        serde_json::Value::String(text) => Some(text),
+        _ => None,
+    }
+}
+
+// Convert the snapshot SKU JSON into the report SKU helper.
+fn report_sku_from_json_value(value: serde_json::Value) -> Option<AzureResourceSkuReportItem> {
+    // Continue only when Azure stored SKU as a JSON object.
+    let serde_json::Value::Object(object) = value else {
+        return None;
+    };
+
+    // Read the common `sku.name` field when it is present as a string.
+    let name = object
+        .get("name")
+        .and_then(|name_value| name_value.as_str())
+        .map(|name| name.to_owned());
+
+    // Return `None` when the object did not contain any useful SKU name.
+    if name.is_none() {
+        return None;
+    }
+
+    // Store the SKU name in the small report model.
+    Some(AzureResourceSkuReportItem { name })
+}
+
+// Convert snapshot tag JSON into the report tag map.
+fn report_tags_from_json_value(value: serde_json::Value) -> Option<BTreeMap<String, String>> {
+    // Continue only when Azure stored tags as a JSON object.
+    let serde_json::Value::Object(object) = value else {
+        return None;
+    };
+
+    // Store tags in a BTreeMap so rendered tag order is deterministic.
+    let mut tags = BTreeMap::new();
+
+    // Convert every JSON tag value into a readable string.
+    for (key, value) in object {
+        // Prefer plain JSON strings because Azure tags are normally strings.
+        let tag_value = match value {
+            serde_json::Value::String(text) => text,
+            other_value => other_value.to_string(),
+        };
+
+        // Insert the tag exactly under its Azure-provided key.
+        tags.insert(key, tag_value);
+    }
+
+    // Return `None` for empty tag objects so missing tags render as `-`.
+    if tags.is_empty() {
+        return None;
+    }
+
+    // Return the prepared tag map.
+    Some(tags)
 }
 
 // Build the prepared tree view from one resource snapshot.
@@ -1587,6 +1759,7 @@ mod tests {
         decode_azure_cli_json_output, group_list_items_from_snapshot,
         list_inventory_reports_in_directory, parse_account_from_tsv, render_groups_list_text,
         render_resources_list_text, render_resources_tree_text,
+        render_saved_resources_list_markdown_from_snapshot,
         render_saved_resources_tree_markdown_from_view, resource_list_items_from_snapshot,
         resource_tree_items_from_snapshot, resource_tree_view_from_snapshot,
         select_snapshot_file_in_directory, slugify_file_stem,
@@ -1880,6 +2053,33 @@ mod tests {
     }
 
     #[test]
+    fn saved_resources_list_markdown_uses_inventory_list_template() {
+        // Build a small resource snapshot envelope for Markdown rendering.
+        let snapshot = sample_resource_snapshot();
+
+        // Render the snapshot through the saved resources-list template path.
+        let markdown = render_saved_resources_list_markdown_from_snapshot(snapshot)
+            .expect("resources-list Markdown should render");
+
+        // Confirm that the Tera template title is used instead of the generic wrapper title.
+        assert!(markdown.starts_with("# Azure resource inventory\n\n"));
+        // Confirm that the generic terminal-output code fence is not used for this report.
+        assert!(!markdown.contains("```text"));
+        // Confirm that subscription metadata from the snapshot is included.
+        assert!(markdown.contains("- Subscription: subscription (sub)"));
+        // Confirm that the resource-group section reconstructed from the snapshot is present.
+        assert!(markdown.contains("### rg-app"));
+        // Confirm that the HTML details layout is no longer rendered.
+        assert!(!markdown.contains("<details>"));
+        assert!(!markdown.contains("<summary>"));
+        // Confirm that resource details are rendered as a compact Markdown bullet.
+        assert!(
+            markdown
+                .contains("- app-api\n  - Location: westeurope\n  - SKU: P1v3\n  - Tags: env=prod")
+        );
+    }
+
+    #[test]
     fn group_snapshot_converts_to_group_list_rows() {
         // Build a small group snapshot envelope for conversion.
         let snapshot = sample_group_snapshot();
@@ -1924,8 +2124,8 @@ mod tests {
         let markdown = render_saved_resources_tree_markdown_from_view(tree_view, body)
             .expect("saved tree Markdown should render");
 
-        // Confirm that the report starts with the expected title.
-        assert!(markdown.starts_with("# Azure resources Tree\n\n"));
+        // Confirm that the report starts with the template title.
+        assert!(markdown.starts_with("# Azure resources Inventory tree\n\n"));
         // Confirm that subscription metadata from the snapshot is included.
         assert!(markdown.contains("- Subscription: subscription (sub)"));
         // Confirm that Azure user metadata from the snapshot is included.
@@ -1971,8 +2171,8 @@ mod tests {
                     resource_group: String::from("rg-app"),
                     location: String::from("westeurope"),
                     kind: Value::Null,
-                    sku: Value::Null,
-                    tags: Value::Object(Default::default()),
+                    sku: serde_json::json!({ "name": "P1v3" }),
+                    tags: serde_json::json!({ "env": "prod" }),
                 },
                 fingerprint: String::from("resource-fingerprint"),
                 raw: Value::Object(Default::default()),

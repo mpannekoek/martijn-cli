@@ -3,8 +3,8 @@ use crate::azure::service::{
     ArtifactMatch, InventoryReportKind, delete_inventory_report, inventory_reports_directory,
     list_inventory_reports, read_inventory_report, render_inventory_groups_list,
     render_inventory_resources_list, render_inventory_resources_tree,
-    render_saved_inventory_markdown, render_saved_inventory_resources_tree_markdown,
-    save_inventory_report_text,
+    render_saved_inventory_markdown, render_saved_inventory_resources_list_markdown,
+    render_saved_inventory_resources_tree_markdown, save_inventory_report_text,
 };
 
 // Import the parsed save option so handlers can decide whether to write a report.
@@ -23,13 +23,8 @@ pub(super) async fn handle_inventory_resources_list(
         Ok(output) => {
             // Print the default stdout output for this inventory command.
             print!("{output}");
-            // Save the output when the user provided `--save`.
-            save_inventory_output_if_requested(
-                InventoryReportKind::ResourcesList,
-                "Azure Resources List",
-                arguments,
-                &output,
-            );
+            // Save the rich Markdown report when the user provided `--save`.
+            save_inventory_resources_list_output_if_requested(arguments);
         }
         Err(error) => {
             // Explain clearly why the inventory command could not complete.
@@ -105,10 +100,7 @@ pub(super) fn handle_report_list() {
         match inventory_reports_directory() {
             Ok(directory) => {
                 // Include the path because it is the most useful next place to inspect.
-                println!(
-                    "No inventory reports found below {}.",
-                    directory.display()
-                );
+                println!("No inventory reports found below {}.", directory.display());
             }
             Err(error) => {
                 // Fall back to the underlying path error when even the directory cannot resolve.
@@ -175,6 +167,48 @@ pub(super) fn handle_report_delete(name: &str) {
         Err(error) => {
             // Show the concrete filesystem problem when deleting cannot continue.
             println!("Unable to delete inventory report: {error}");
+        }
+    }
+}
+
+// Save the resource list report through the dedicated Markdown template when requested.
+fn save_inventory_resources_list_output_if_requested(arguments: &SaveArguments) {
+    // Stop early when the user did not request a saved report.
+    let Some(requested_name) = arguments.save.as_deref() else {
+        return;
+    };
+
+    // Treat the empty `--save` value as an automatic generated file name.
+    let requested_name = if requested_name.trim().is_empty() {
+        None
+    } else {
+        Some(requested_name)
+    };
+
+    // Render the full resources-list Markdown report from the selected snapshot.
+    let markdown =
+        match render_saved_inventory_resources_list_markdown(arguments.snapshot.as_deref()) {
+            Ok(markdown) => markdown,
+            Err(error) => {
+                // Explain clearly why saving failed while keeping stdout behavior intact.
+                println!("Unable to save the inventory report: {error}");
+                return;
+            }
+        };
+
+    // Ask the service layer to write the report to the resources/list directory.
+    match save_inventory_report_text(
+        InventoryReportKind::ResourcesList,
+        requested_name,
+        &markdown,
+    ) {
+        Ok(path) => {
+            // Confirm success and show the final path to the newly created report.
+            println!("Inventory report saved to {}", path.display());
+        }
+        Err(error) => {
+            // Explain clearly why saving failed while keeping stdout behavior intact.
+            println!("Unable to save the inventory report: {error}");
         }
     }
 }

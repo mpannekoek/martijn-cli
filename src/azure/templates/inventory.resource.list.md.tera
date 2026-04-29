@@ -1,5 +1,6 @@
-# Azure resource Inventory list
+# Azure resource inventory
 
+## Metadata
 - Generated: {{ generated_at }}
 - Subscription: {{ subscription_name }} ({{ subscription_id }})
 - Azure user: {{ azure_user }}
@@ -8,7 +9,7 @@
 
 ## Summary
 
-### Resources per type
+### Resource types
 {% if resources_per_type | length > 0 %}
 {% for row in resources_per_type %}- {{ row.label }}: {{ row.count }}
 {% endfor %}
@@ -16,7 +17,7 @@
 - -
 {% endif %}
 
-### Resources per region
+### Regions
 {% if resources_per_region | length > 0 %}
 {% for row in resources_per_region %}- {{ row.label }}: {{ row.count }}
 {% endfor %}
@@ -36,19 +37,28 @@ At this time, there are no empty resource groups.
 - Resources without tags: {{ resources_without_tags }}
 - Non-standard regions detected:{% if non_standard_regions | length > 0 %} {{ non_standard_regions | join(sep=", ") }}{% else %} -{% endif %} (westeurope is the default)
 
+## Resource groups
+
 {% for group in groups %}
-## {{ group.name }} ({{ group.location }})
+### {{ group.name }}{% if group.has_location %} ({{ group.location }}){% endif %}
 
 Total resources: {{ group.total_resources }}
 
-| Name | Type | Location | SKU | Tags |
-|------|------|----------|-----|------|
-{% if group.resources | length > 0 -%}
-{% for resource in group.resources -%}
-| {{ resource.name }} | {{ resource.resource_type }} | {{ resource.location }} | {{ resource.sku }} | {{ resource.tags }} |
-{% endfor -%}
-{% else -%}
-| - | - | - | - | - |
+{% if group.resource_types | length > 0 %}
+{% for resource_type in group.resource_types %}
+#### {{ resource_type.name }} ({{ resource_type.total_resources }})
+
+{% for resource in resource_type.resources -%}
+- {{ resource.name }}
+  - Location: {{ resource.location }}
+{% if resource.has_sku %}  - SKU: {{ resource.sku }}
+{% endif -%}
+{% if resource.has_tags %}  - Tags: {{ resource.tags }}
+{% endif -%}
+{% endfor %}
+{% endfor %}
+{% else %}
+- -
 {% endif %}
 
 {% endfor %}
