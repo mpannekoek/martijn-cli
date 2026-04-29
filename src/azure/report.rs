@@ -28,9 +28,9 @@ use time::macros::format_description;
 use uuid::Uuid;
 
 // Keep the inventory template name in one constant so loading and rendering use the same key.
-const INVENTORY_TEMPLATE_NAME: &str = "inventory.md.tera";
+const INVENTORY_TEMPLATE_NAME: &str = "inventory.resource.list.md.tera";
 // Load the Markdown template at compile time so runtime lookup remains simple.
-const INVENTORY_TEMPLATE_SOURCE: &str = include_str!("templates/inventory.md.tera");
+const INVENTORY_TEMPLATE_SOURCE: &str = include_str!("templates/inventory.resource.list.md.tera");
 // Keep the default Azure region in one place for non-standard region detection.
 const DEFAULT_REGION: &str = "westeurope";
 
@@ -757,8 +757,8 @@ mod tests {
         let markdown = render_inventory_markdown(&account, &inventory_groups, 2)
             .expect("inventory markdown should render successfully");
 
-        // Confirm that the new layout starts with the expected heading.
-        assert!(markdown.starts_with("# Azure Inventory\n\n"));
+        // Confirm that the current resource inventory template heading is rendered.
+        assert!(markdown.starts_with("# Azure resource Inventory\n\n"));
         // Confirm that YAML front matter is no longer present.
         assert!(!markdown.starts_with("---\n"));
         // Confirm that metadata bullets are rendered.

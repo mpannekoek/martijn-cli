@@ -13,18 +13,32 @@ use crate::azure::snapshot::{
 };
 // Import the shared application result type.
 use crate::AppResult;
-// Import filesystem helpers so we can create directories and write files.
-use std::fs;
+// Import `Serialize` so tree report metadata can be passed into a Tera template.
+use serde::Serialize;
 // Import `BTreeMap` so snapshot resources can be grouped into stable tree output.
 use std::collections::BTreeMap;
+// Import filesystem helpers so we can create directories and write files.
+use std::fs;
 // Import `Path` and `PathBuf` because this service reads and writes report files.
 use std::path::{Path, PathBuf};
 // Import `Stdio` so we can control how spawned processes use standard streams.
 use std::process::Stdio;
 // Import `SystemTime` so inventory listings can expose filesystem modification times.
 use std::time::SystemTime;
+// Import Tera helpers so saved tree reports can be rendered from a Markdown template.
+use tera::{Context, Tera};
+// Import time helpers so saved reports can show when they were generated.
+use time::OffsetDateTime;
+// Import the custom timestamp formatter macro used for human-readable report metadata.
+use time::macros::format_description;
 // Import Tokio's async `Command` so Azure CLI calls work inside async code.
 use tokio::process::Command;
+
+// Keep the resources-tree template name in one constant so registration and rendering stay aligned.
+const INVENTORY_RESOURCES_TREE_TEMPLATE_NAME: &str = "inventory.resource.tree.md.tera";
+// Embed the saved tree Markdown template at compile time so runtime file lookup is unnecessary.
+const INVENTORY_RESOURCES_TREE_TEMPLATE_SOURCE: &str =
+    include_str!("templates/inventory.resource.tree.md.tera");
 
 // Store the fields needed for the subscription-wide `inventory resources list` command.
 #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
@@ -40,6 +54,44 @@ struct AzureSubscriptionResourceListItem {
     // Use an empty string when Azure does not send a location for this resource.
     #[serde(default)]
     location: String,
+}
+
+// Store the prepared data for one resource-tree render.
+#[derive(Debug, PartialEq, Eq)]
+struct InventoryResourcesTreeView {
+    // Store the subscription name that becomes the root of the plain text tree.
+    subscription_name: String,
+    // Store the subscription ID so saved Markdown can identify the source snapshot.
+    subscription_id: String,
+    // Store the Azure user from the snapshot metadata for saved Markdown reports.
+    azure_user: String,
+    // Store how many resource-group buckets are visible in the rendered tree.
+    resource_group_count: usize,
+    // Store how many resources were read from the snapshot.
+    total_resources: usize,
+    // Store resources grouped by resource group in deterministic display order.
+    grouped_resources: BTreeMap<String, Vec<String>>,
+    // Store the final plain text tree so stdout and saved Markdown can share it.
+    tree_body: String,
+}
+
+// Store the exact fields used by the saved resources-tree Markdown template.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct InventoryResourcesTreeTemplateView {
+    // Store the human-readable UTC time when the saved report was rendered.
+    generated_at: String,
+    // Store the subscription name shown in the report metadata.
+    subscription_name: String,
+    // Store the subscription ID shown in the report metadata.
+    subscription_id: String,
+    // Store the Azure user shown in the report metadata.
+    azure_user: String,
+    // Store how many resource groups are visible in the tree.
+    resource_group_count: usize,
+    // Store how many resources are visible in the tree.
+    total_resources: usize,
+    // Store the plain text tree that will be placed in one Markdown code block.
+    tree_body: String,
 }
 
 // Describe one saved Azure inventory Markdown report on disk.
@@ -195,14 +247,81 @@ pub(crate) fn render_inventory_resources_list(snapshot_name: Option<&str>) -> Ap
     Ok(render_resources_list_text(&resources))
 }
 
-// Build a compact Markdown code block tree from a saved resources snapshot.
+// Build a compact plain text resource tree from a saved resources snapshot.
 pub(crate) fn render_inventory_resources_tree(snapshot_name: Option<&str>) -> AppResult<String> {
     // Read only the resource snapshot because the tree intentionally ignores group snapshots.
     let snapshot = read_resource_snapshot(snapshot_name)?;
-    // Convert resources into group-name buckets for the hierarchical view.
-    let grouped_resources = resource_tree_items_from_snapshot(snapshot);
-    // Render the grouped names as a fenced Markdown code block.
-    Ok(render_resources_tree_markdown(&grouped_resources))
+    // Convert the snapshot into one prepared view that keeps metadata and tree text together.
+    let tree_view = resource_tree_view_from_snapshot(snapshot);
+    // Return only the plain tree body because stdout should not contain Markdown.
+    Ok(tree_view.tree_body)
+}
+
+// Build a saved Markdown report for the resource tree using snapshot metadata.
+pub(crate) fn render_saved_inventory_resources_tree_markdown(
+    snapshot_name: Option<&str>,
+    tree_body: &str,
+) -> AppResult<String> {
+    // Read the selected snapshot again so the saved report can include reliable metadata.
+    let snapshot = read_resource_snapshot(snapshot_name)?;
+    // Build the same tree view shape used by stdout so counts and metadata stay consistent.
+    let tree_view = resource_tree_view_from_snapshot(snapshot);
+    // Render the final Markdown from the prepared metadata and the caller-provided tree body.
+    render_saved_resources_tree_markdown_from_view(tree_view, tree_body)
+}
+
+// Render saved resources-tree Markdown from an already prepared tree view.
+fn render_saved_resources_tree_markdown_from_view(
+    tree_view: InventoryResourcesTreeView,
+    tree_body: &str,
+) -> AppResult<String> {
+    // Capture the current UTC time once for the saved report metadata.
+    let generated_at = OffsetDateTime::now_utc();
+    // Describe the compact timestamp format used by the other inventory Markdown reports.
+    let generated_at_format = format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
+    // Convert the timestamp into text and surface a clear error if formatting fails.
+    let generated_at_display = generated_at.format(&generated_at_format).map_err(|error| {
+        format!("unable to format the resources tree report generation timestamp: {error}")
+    })?;
+
+    // Double-check during development that the cached count matches the grouped tree data.
+    debug_assert_eq!(
+        tree_view.resource_group_count,
+        tree_view.grouped_resources.len()
+    );
+
+    // Build the serializable view that exactly matches the Tera template fields.
+    let template_view = InventoryResourcesTreeTemplateView {
+        generated_at: generated_at_display,
+        subscription_name: tree_view.subscription_name,
+        subscription_id: tree_view.subscription_id,
+        azure_user: tree_view.azure_user,
+        resource_group_count: tree_view.resource_group_count,
+        total_resources: tree_view.total_resources,
+        tree_body: ensure_trailing_newline(tree_body),
+    };
+    // Convert the strongly typed view into a Tera context for template rendering.
+    let template_context = Context::from_serialize(&template_view)
+        .map_err(|error| format!("unable to build the resources tree template context: {error}"))?;
+
+    // Create a fresh in-memory Tera registry for this single embedded template.
+    let mut tera = Tera::default();
+    // Register the Markdown template under a stable logical name.
+    tera.add_raw_template(
+        INVENTORY_RESOURCES_TREE_TEMPLATE_NAME,
+        INVENTORY_RESOURCES_TREE_TEMPLATE_SOURCE,
+    )
+    .map_err(|error| format!("unable to load the resources tree Markdown template: {error}"))?;
+
+    // Render the saved Markdown report from the prepared context.
+    let markdown = tera
+        .render(INVENTORY_RESOURCES_TREE_TEMPLATE_NAME, &template_context)
+        .map_err(|error| {
+            format!("unable to render the resources tree Markdown template: {error}")
+        })?;
+
+    // Return the completed Markdown document.
+    Ok(markdown)
 }
 
 // Build a terminal-friendly resource-group list from a saved groups snapshot.
@@ -618,6 +737,35 @@ fn group_list_items_from_snapshot(
     groups
 }
 
+// Build the prepared tree view from one resource snapshot.
+fn resource_tree_view_from_snapshot(snapshot: AzureSnapshotEnvelope) -> InventoryResourcesTreeView {
+    // Normalize the subscription name before it becomes the root line of the tree.
+    let subscription_name = display_value(&snapshot.subscription.name);
+    // Normalize the subscription ID so saved Markdown has a visible fallback.
+    let subscription_id = display_value(&snapshot.subscription.id);
+    // Normalize the Azure user so saved Markdown has a visible fallback.
+    let azure_user = display_value(&snapshot.subscription.user);
+    // Count resources before moving them out of the snapshot envelope.
+    let total_resources = snapshot.resources.len();
+    // Convert all snapshot resources into deterministic resource-group buckets.
+    let grouped_resources = resource_tree_items_from_snapshot(snapshot);
+    // Count only the groups that are actually visible in this resource snapshot.
+    let resource_group_count = grouped_resources.len();
+    // Render the final plain text tree once so stdout and saved Markdown can share the body.
+    let tree_body = render_resources_tree_text(&subscription_name, &grouped_resources);
+
+    // Return one prepared view with both metadata and rendered output.
+    InventoryResourcesTreeView {
+        subscription_name,
+        subscription_id,
+        azure_user,
+        resource_group_count,
+        total_resources,
+        grouped_resources,
+        tree_body,
+    }
+}
+
 // Group resource names from one resource snapshot by resource group name.
 fn resource_tree_items_from_snapshot(
     snapshot: AzureSnapshotEnvelope,
@@ -754,7 +902,7 @@ fn list_inventory_reports_in_single_directory(
     Ok(reports)
 }
 
-// Check whether a file name belongs to an Azure inventory Markdown report.
+// Check whether a file name belongs to an inventory Markdown report.
 fn is_inventory_report_file_name(file_name: &str) -> bool {
     // Require the Markdown extension because generated reports are Markdown documents.
     file_name.ends_with(".md")
@@ -1121,31 +1269,55 @@ fn render_resources_list_text(resources: &[AzureSubscriptionResourceListItem]) -
     output
 }
 
-// Render a compact resource tree as a Markdown fenced code block.
-pub(crate) fn render_resources_tree_markdown(
+// Render a compact resource tree as plain text for terminal output.
+pub(crate) fn render_resources_tree_text(
+    subscription_name: &str,
     grouped_resources: &BTreeMap<String, Vec<String>>,
 ) -> String {
-    // Start a plain text code block because the tree is meant to be pasted into Markdown.
-    let mut output = String::from("```text\n");
+    // Start with the subscription as the root node of the tree.
+    let mut output = format!("{subscription_name}\n");
 
-    // Handle an empty resource snapshot with one clear placeholder line.
+    // Stop after the root line when the snapshot contains no resource groups.
     if grouped_resources.is_empty() {
-        output.push_str("-\n");
-        output.push_str("```\n");
         return output;
     }
 
-    // Render each resource group as a parent line.
-    for (resource_group_name, resource_names) in grouped_resources {
-        // Print only the group name because this view is intentionally short.
+    // Store the number of groups so we can choose the final connector correctly.
+    let group_count = grouped_resources.len();
+    // Render each resource group as a child of the subscription root.
+    for (group_index, (resource_group_name, resource_names)) in grouped_resources.iter().enumerate()
+    {
+        // Check whether this group is the final child of the subscription root.
+        let group_is_last = group_index + 1 == group_count;
+        // Pick the connector that visually marks either a middle child or the last child.
+        let group_connector = if group_is_last {
+            " └── "
+        } else {
+            " ├── "
+        };
+
+        // Append the resource group line below the subscription root.
+        output.push_str(group_connector);
+        // Print only the group name because this view intentionally stays compact.
         output.push_str(resource_group_name);
-        // End the group line before rendering child resources.
+        // End the resource group line before rendering child resources.
         output.push('\n');
 
-        // Render every resource name directly below its group.
-        for resource_name in resource_names {
-            // Use two spaces to make the hierarchy visible without extra symbols.
-            output.push_str("  ");
+        // Store the number of resources so the final resource can get the closing connector.
+        let resource_count = resource_names.len();
+        // Render every resource name directly below its resource group.
+        for (resource_index, resource_name) in resource_names.iter().enumerate() {
+            // Check whether this resource is the final child of its group.
+            let resource_is_last = resource_index + 1 == resource_count;
+            // Pick the connector for a middle resource or the final resource.
+            let resource_connector = if resource_is_last {
+                "      └── "
+            } else {
+                "      ├── "
+            };
+
+            // Append the resource line using the fixed indentation requested for this command.
+            output.push_str(resource_connector);
             // Print only the resource name because types and locations are intentionally omitted.
             output.push_str(resource_name);
             // End the resource line.
@@ -1153,9 +1325,7 @@ pub(crate) fn render_resources_tree_markdown(
         }
     }
 
-    // Close the Markdown fenced code block.
-    output.push_str("```\n");
-    // Return the compact tree.
+    // Return the complete plain text tree.
     output
 }
 
@@ -1207,21 +1377,6 @@ pub(crate) fn render_saved_inventory_markdown(title: &str, body: &str) -> String
     markdown
 }
 
-// Wrap an already-fenced Markdown tree in a small Markdown report.
-pub(crate) fn render_saved_inventory_tree_markdown(title: &str, body: &str) -> String {
-    // Start with a Markdown heading for the saved tree report.
-    let mut markdown = format!("# {title}\n\n");
-    // Include the already-fenced tree exactly once so the report avoids nested code blocks.
-    markdown.push_str(body);
-    // Ensure the file ends with a newline for tidy Markdown output.
-    if !markdown.ends_with('\n') {
-        markdown.push('\n');
-    }
-
-    // Return the complete Markdown report.
-    markdown
-}
-
 // Normalize one display value to a dash when Azure returned empty text.
 fn display_value(value: &str) -> String {
     // Remove surrounding whitespace before checking whether the value is meaningful.
@@ -1234,6 +1389,20 @@ fn display_value(value: &str) -> String {
 
     // Return the visible value unchanged otherwise.
     trimmed.to_owned()
+}
+
+// Return text with exactly the newline needed before a Markdown fence closes.
+fn ensure_trailing_newline(text: &str) -> String {
+    // Clone the input into an owned string because templates need owned serializable values.
+    let mut output = text.to_owned();
+
+    // Add a newline only when the caller supplied text without one.
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    // Return the normalized text.
+    output
 }
 
 // Sort subscription resources by type, group and name case-insensitively.
@@ -1417,9 +1586,10 @@ mod tests {
         build_inventory_report_file_name, build_service_principal_login_arguments,
         decode_azure_cli_json_output, group_list_items_from_snapshot,
         list_inventory_reports_in_directory, parse_account_from_tsv, render_groups_list_text,
-        render_resources_list_text, render_resources_tree_markdown,
-        render_saved_inventory_tree_markdown, resource_list_items_from_snapshot,
-        resource_tree_items_from_snapshot, select_snapshot_file_in_directory, slugify_file_stem,
+        render_resources_list_text, render_resources_tree_text,
+        render_saved_resources_tree_markdown_from_view, resource_list_items_from_snapshot,
+        resource_tree_items_from_snapshot, resource_tree_view_from_snapshot,
+        select_snapshot_file_in_directory, slugify_file_stem,
     };
     // Import model types so rendering tests can build representative Azure data.
     use crate::azure::model::{
@@ -1730,11 +1900,13 @@ mod tests {
 
         // Group resource names by resource group.
         let grouped_resources = resource_tree_items_from_snapshot(snapshot);
-        // Render the tree as a fenced Markdown code block.
-        let output = render_resources_tree_markdown(&grouped_resources);
+        // Render the tree as plain text rooted at the snapshot subscription.
+        let output = render_resources_tree_text("subscription", &grouped_resources);
 
-        // Confirm that stdout is exactly the compact Markdown tree shape.
-        assert_eq!(output, "```text\nrg-app\n  app-api\n```\n");
+        // Confirm that stdout is exactly the compact plain text tree shape.
+        assert_eq!(output, "subscription\n └── rg-app\n      └── app-api\n");
+        // Confirm that stdout no longer contains Markdown fences.
+        assert!(!output.contains("```"));
         // Confirm that intentionally omitted metadata does not leak into the tree.
         assert!(!output.contains("Microsoft.Web/sites"));
         // Confirm that intentionally omitted locations do not leak into the tree.
@@ -1742,18 +1914,29 @@ mod tests {
     }
 
     #[test]
-    fn saved_tree_markdown_keeps_single_code_block() {
-        // Build one already-fenced Markdown tree body.
-        let body = "```text\nrg-app\n  app-api\n```\n";
+    fn saved_tree_markdown_includes_metadata_and_one_code_block() {
+        // Build one plain text tree body like the command prints to stdout.
+        let body = "subscription\n └── rg-app\n      └── app-api\n";
 
-        // Wrap the tree in a saved Markdown report.
-        let markdown = render_saved_inventory_tree_markdown("Azure Resources Tree", body);
+        // Build a prepared tree view from the sample snapshot metadata.
+        let tree_view = resource_tree_view_from_snapshot(sample_resource_snapshot());
+        // Render the tree in the saved Markdown report template.
+        let markdown = render_saved_resources_tree_markdown_from_view(tree_view, body)
+            .expect("saved tree Markdown should render");
 
         // Confirm that the report starts with the expected title.
-        assert!(markdown.starts_with("# Azure Resources Tree\n\n"));
-        // Confirm that the fenced tree body is included unchanged.
+        assert!(markdown.starts_with("# Azure resources Tree\n\n"));
+        // Confirm that subscription metadata from the snapshot is included.
+        assert!(markdown.contains("- Subscription: subscription (sub)"));
+        // Confirm that Azure user metadata from the snapshot is included.
+        assert!(markdown.contains("- Azure user: user@example.com"));
+        // Confirm that resource counts from the snapshot are included.
+        assert!(markdown.contains("- Resource groups: 1"));
+        // Confirm that total resource counts from the snapshot are included.
+        assert!(markdown.contains("- Total resources: 1"));
+        // Confirm that the plain stdout tree body is included unchanged.
         assert!(markdown.contains(body));
-        // Confirm that no second text fence was added around the body.
+        // Confirm that exactly one text fence wraps the plain tree body.
         assert_eq!(markdown.matches("```text").count(), 1);
     }
 

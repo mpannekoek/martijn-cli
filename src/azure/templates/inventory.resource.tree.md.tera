@@ -1,0 +1,12 @@
+# Azure resources Inventory tree
+
+- Generated: {{ generated_at }}
+- Subscription: {{ subscription_name }} ({{ subscription_id }})
+- Azure user: {{ azure_user }}
+- Resource groups: {{ resource_group_count }}
+- Total resources: {{ total_resources }}
+
+## Summary
+
+```text
+{{ tree_body }}```

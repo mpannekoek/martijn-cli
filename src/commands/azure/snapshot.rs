@@ -22,14 +22,11 @@ pub(super) async fn handle_snapshot_create_resources(state: &mut SessionState) {
     match generate_resource_snapshot(account).await {
         Ok(output_file_path) => {
             // Confirm success and show the final path to the newly created snapshot.
-            println!(
-                "Azure resource snapshot saved to {}",
-                output_file_path.display()
-            );
+            println!("Resource snapshot saved to {}", output_file_path.display());
         }
         Err(error) => {
             // Explain clearly why the snapshot could not be generated.
-            println!("Unable to generate the Azure resource snapshot: {error}");
+            println!("Unable to generate the resource snapshot: {error}");
         }
     }
 }
@@ -49,14 +46,11 @@ pub(super) async fn handle_snapshot_create_groups(state: &mut SessionState) {
     match generate_group_snapshot(account).await {
         Ok(output_file_path) => {
             // Confirm success and show the final path to the newly created snapshot.
-            println!(
-                "Azure group snapshot saved to {}",
-                output_file_path.display()
-            );
+            println!("Group snapshot saved to {}", output_file_path.display());
         }
         Err(error) => {
             // Explain clearly why the snapshot could not be generated.
-            println!("Unable to generate the Azure group snapshot: {error}");
+            println!("Unable to generate the group snapshot: {error}");
         }
     }
 }
@@ -83,7 +77,7 @@ pub(super) async fn handle_snapshot_create_all(state: &mut SessionState) {
         }
         Err(error) => {
             // Explain clearly why the first snapshot could not be generated.
-            println!("Unable to generate the Azure resource snapshot: {error}");
+            println!("Unable to generate the resource snapshot: {error}");
             return;
         }
     }
@@ -92,14 +86,11 @@ pub(super) async fn handle_snapshot_create_all(state: &mut SessionState) {
     match generate_group_snapshot(account).await {
         Ok(output_file_path) => {
             // Confirm success and show the final path to the newly created snapshot.
-            println!(
-                "Azure group snapshot saved to {}",
-                output_file_path.display()
-            );
+            println!("Group snapshot saved to {}", output_file_path.display());
         }
         Err(error) => {
             // Explain clearly why the second snapshot could not be generated.
-            println!("Unable to generate the Azure group snapshot: {error}");
+            println!("Unable to generate the group snapshot: {error}");
         }
     }
 }

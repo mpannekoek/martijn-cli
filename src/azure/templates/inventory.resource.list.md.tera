@@ -1,4 +1,4 @@
-# Azure Inventory
+# Azure resource Inventory list
 
 - Generated: {{ generated_at }}
 - Subscription: {{ subscription_name }} ({{ subscription_id }})
